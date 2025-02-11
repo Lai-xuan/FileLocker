@@ -1,7 +1,7 @@
 # FileLocker
-這是一個可以使用 AES IV 加密並使用 PBKDF2 生成密鑰的軟體。(目前介面只有中文)
+這是一個可以使用 AES IV 加密檔案、資料夾，並使用 PBKDF2 生成密鑰的軟體。(目前介面只有中文)
 
-This is a software that can encrypt with AES IV and generate keys using PBKDF2(The temporary interface language is only Chinese)
+This is a software that can use AES IV to encrypt files and folders, and use PBKDF2 to generate keys. (The temporary interface language is only Chinese)
 
 ⬇️這是目前版本(v1.0-beta)的使用介面 This is the user interface of the current version (v1.0-beta)
 ---------------------------------------------------------------------------------------------
