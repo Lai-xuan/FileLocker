@@ -10,3 +10,5 @@ This is a software that can encrypt with AES IV and generate keys using PBKDF2(T
 未來可能會加入的功能:加密資料庫(將所有被加密檔案集中管理)、視窗壓克力效果、UI界面美化、增加其他語言的使用介面
 
 Features that may be added in the future: encrypted database (centralized management of all encrypted files), window acrylic effects, UI interface beautification, and adding user interfaces in other languages.
+
+-I'm sorry for my poor English skills:(
