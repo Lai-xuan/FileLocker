@@ -3,7 +3,7 @@
 
 This is a software that can encrypt with AES IV and generate keys using PBKDF2(The temporary interface language is only Chinese)
 
-⬇️這是目前(v1.0-beta)的使用介面 This is the user interface of the current version (v1.0-beta)
+⬇️這是目前版本(v1.0-beta)的使用介面 This is the user interface of the current version (v1.0-beta)
 ---------------------------------------------------------------------------------------------
 ![image](https://github.com/user-attachments/assets/b77b0f62-99cc-42bd-856a-42868c24a5ec)
 
