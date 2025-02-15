@@ -7,6 +7,9 @@ This is a software that can use AES IV to encrypt files and folders, and use PBK
 ---------------------------------------------------------------------------------------------
 ![image](https://github.com/user-attachments/assets/abd71e28-40bd-438e-a509-d28221e18357)
 
+(頁面切換功能在v0.2.0-beta中尚未製作，在0.2.X版本內會製作)
+
+(The page switching function has not been implemented in v0.2.0-beta, but will be implemented in version 0.2.X)
 
 ⬇️這是版本v0.1.0-beta的使用介面 This is the user interface of the version v0.1.0-beta
 ---------------------------------------------------------------------------------------------
