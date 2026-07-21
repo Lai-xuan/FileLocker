@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+
 namespace FileLocker.Core.SecureDelete;
 
 /// <summary>
@@ -7,18 +9,56 @@ namespace FileLocker.Core.SecureDelete;
 /// </summary>
 public static class SecureFileEraser
 {
-    /// <summary>
-    /// TODO: 開啟檔案、寫入與原檔案等長的隨機位元組（RandomNumberGenerator.Fill）覆寫 passes 次，
-    /// 每次覆寫後 Flush，最後才呼叫 File.Delete。
-    /// </summary>
+    private const int BufferSizeBytes = 1024 * 1024; // 1 MB，避免大檔案一次配置過大的緩衝區
+
+    /// <summary>檔案不存在時直接視為已完成（冪等），不拋例外，方便呼叫端安全地重複呼叫。</summary>
     public static void OverwriteAndDelete(string filePath, int passes = 1)
     {
-        throw new NotImplementedException();
+        if (!File.Exists(filePath))
+        {
+            return;
+        }
+
+        var length = new FileInfo(filePath).Length;
+
+        if (length > 0)
+        {
+            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Write, FileShare.None);
+            var buffer = new byte[Math.Min(length, BufferSizeBytes)];
+
+            for (var pass = 0; pass < passes; pass++)
+            {
+                stream.Position = 0;
+                var remaining = length;
+
+                while (remaining > 0)
+                {
+                    var chunkSize = (int)Math.Min(buffer.Length, remaining);
+                    RandomNumberGenerator.Fill(buffer.AsSpan(0, chunkSize));
+                    stream.Write(buffer, 0, chunkSize);
+                    remaining -= chunkSize;
+                }
+
+                stream.Flush();
+            }
+        }
+
+        File.Delete(filePath);
     }
 
-    /// <summary>對資料夾內每個檔案個別呼叫 OverwriteAndDelete，最後才刪除資料夾本身。</summary>
+    /// <summary>對資料夾內每個檔案個別覆寫刪除，最後才刪除資料夾本身。資料夾不存在時同樣視為已完成。</summary>
     public static void OverwriteAndDeleteFolder(string folderPath, int passes = 1)
     {
-        throw new NotImplementedException();
+        if (!Directory.Exists(folderPath))
+        {
+            return;
+        }
+
+        foreach (var filePath in Directory.EnumerateFiles(folderPath, "*", SearchOption.AllDirectories))
+        {
+            OverwriteAndDelete(filePath, passes);
+        }
+
+        Directory.Delete(folderPath, recursive: true);
     }
 }
