@@ -1,3 +1,4 @@
+using System.Text.Json;
 using FileLocker.Core.Crypto;
 
 namespace FileLocker.Core;
@@ -18,9 +19,36 @@ public class LockedMarkerFile
     public bool VerifySignature(byte[] vaultSigningKey)
         => MarkerSigner.Verify(Uuid, SignatureBase64, vaultSigningKey);
 
-    /// <summary>TODO: 序列化成 JSON 寫入 path（System.Text.Json）。</summary>
-    public void WriteTo(string path) => throw new NotImplementedException();
+    public void WriteTo(string path)
+    {
+        var json = JsonSerializer.Serialize(this);
+        File.WriteAllText(path, json);
+    }
 
-    /// <summary>TODO: 從 path 讀取並反序列化；找不到檔案或格式錯誤回傳 null 由呼叫端處理錯誤訊息。</summary>
-    public static LockedMarkerFile? ReadFrom(string path) => throw new NotImplementedException();
+    /// <summary>
+    /// 找不到檔案、或內容不是合法的 JSON／缺少必要欄位，一律回傳 null，不把例外往外拋——
+    /// 呼叫端（雙擊 .locked 檔案的流程）只需要處理「讀得到內容」跟「讀不到/壞掉」兩種情況，
+    /// 並在讀不到時顯示對應的錯誤提示，而不是讓整個流程因未處理例外而崩潰。
+    /// </summary>
+    public static LockedMarkerFile? ReadFrom(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            var json = File.ReadAllText(path);
+            return JsonSerializer.Deserialize<LockedMarkerFile>(json);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+    }
 }

@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+
 namespace FileLocker.Core.Crypto;
 
 /// <summary>
@@ -7,20 +10,38 @@ namespace FileLocker.Core.Crypto;
 /// </summary>
 public static class MarkerSigner
 {
-    /// <summary>
-    /// TODO: 用 System.Security.Cryptography.HMACSHA256 實作
-    ///   using var hmac = new HMACSHA256(vaultSigningKey);
-    ///   var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(uuid));
-    ///   return Convert.ToBase64String(hash);
-    /// </summary>
     public static string Sign(string uuid, byte[] vaultSigningKey)
     {
-        throw new NotImplementedException();
+        using var hmac = new HMACSHA256(vaultSigningKey);
+        var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(uuid));
+        return Convert.ToBase64String(hash);
     }
 
-    /// <summary>用固定時間比較（CryptographicOperations.FixedTimeEquals）驗證簽章，避免時序攻擊。</summary>
+    /// <summary>
+    /// 用固定時間比較驗證簽章，避免時序攻擊。簽章格式錯誤（不是合法的 Base64）視為驗證失敗，
+    /// 不讓例外往外拋——呼叫端（開啟 .locked 檔案的流程）只需要處理「合法/不合法」兩種結果就好。
+    /// </summary>
     public static bool Verify(string uuid, string signatureBase64, byte[] vaultSigningKey)
     {
-        throw new NotImplementedException();
+        byte[] providedSignature;
+        try
+        {
+            providedSignature = Convert.FromBase64String(signatureBase64);
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+
+        var expectedSignature = Convert.FromBase64String(Sign(uuid, vaultSigningKey));
+
+        // FixedTimeEquals 要求兩個陣列長度相同，長度不同直接視為不符（HMAC-SHA256 輸出長度固定，
+        // 長度不對通常代表簽章本身格式就是錯的，不需要再進固定時間比較）。
+        if (providedSignature.Length != expectedSignature.Length)
+        {
+            return false;
+        }
+
+        return CryptographicOperations.FixedTimeEquals(providedSignature, expectedSignature);
     }
 }

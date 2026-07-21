@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.Text;
+using Konscious.Security.Cryptography;
 
 namespace FileLocker.Core.Crypto;
 
@@ -16,6 +18,9 @@ public static class KeyDerivationDefaults
 
     /// <summary>Argon2id 輸出的主金鑰長度（bytes），之後會再用 HKDF 切成兩把子金鑰。</summary>
     public const int MasterKeySizeBytes = 32;
+
+    /// <summary>切分出來的每把子金鑰長度（AES-256 金鑰需要 32 bytes）。</summary>
+    public const int SubKeySizeBytes = 32;
 }
 
 /// <summary>
@@ -26,17 +31,17 @@ public readonly record struct DerivedKeys(byte[] EncryptionKey, byte[] Verificat
 
 public static class Argon2KeyDerivation
 {
+    // HKDF 的 info 參數用固定、彼此不同的字串，確保兩把子金鑰之間無法互相推導。
+    private static readonly byte[] EncryptionInfo = Encoding.UTF8.GetBytes("FileLocker/encryption/v1");
+    private static readonly byte[] VerificationInfo = Encoding.UTF8.GetBytes("FileLocker/verification/v1");
+
     /// <summary>產生一份新的隨機 Salt，每次加密都要重新產生，不可重複使用。</summary>
     public static byte[] GenerateSalt()
         => RandomNumberGenerator.GetBytes(KeyDerivationDefaults.SaltSizeBytes);
 
     /// <summary>
     /// 用 Argon2id(password, salt) 衍生出主金鑰。
-    /// TODO: 用 Konscious.Security.Cryptography.Argon2id 實作
-    ///   var argon2 = new Argon2id(Encoding.UTF8.GetBytes(password));
-    ///   argon2.Salt = salt; argon2.DegreeOfParallelism = parallelism;
-    ///   argon2.MemorySize = memoryCostKb; argon2.Iterations = timeCost;
-    ///   return argon2.GetBytes(KeyDerivationDefaults.MasterKeySizeBytes);
+    /// 這一步是刻意設計成「慢」的（記憶體成本 + 時間成本），拖慢暴力破解的速度。
     /// </summary>
     public static byte[] DeriveMasterKey(
         string password,
@@ -45,16 +50,77 @@ public static class Argon2KeyDerivation
         int memoryCostKb = KeyDerivationDefaults.MemoryCostKb,
         int parallelism = KeyDerivationDefaults.Parallelism)
     {
-        throw new NotImplementedException();
+        using var argon2 = new Argon2id(Encoding.UTF8.GetBytes(password))
+        {
+            Salt = salt,
+            DegreeOfParallelism = parallelism,
+            MemorySize = memoryCostKb,
+            Iterations = timeCost
+        };
+
+        return argon2.GetBytes(KeyDerivationDefaults.MasterKeySizeBytes);
     }
 
     /// <summary>
-    /// 用 HKDF 從主金鑰切出兩把用途不同的子金鑰（info 參數需固定不同字串，例如 "FileLocker/encryption" 與
-    /// "FileLocker/verification"，確保兩把金鑰彼此無法互相推導）。
-    /// TODO: 用 System.Security.Cryptography.HKDF.Expand 實作
+    /// 用 HKDF 從主金鑰切出兩把用途不同的子金鑰。主金鑰本身已經是 Argon2id 輸出的高熵值，
+    /// 這裡直接把它當作 HKDF 的 PRK（Pseudo-Random Key）使用 HKDF-Expand，不需要再做一次 HKDF-Extract。
     /// </summary>
     public static DerivedKeys SplitMasterKey(byte[] masterKey)
     {
-        throw new NotImplementedException();
+        var encryptionKey = new byte[KeyDerivationDefaults.SubKeySizeBytes];
+        var verificationHash = new byte[KeyDerivationDefaults.SubKeySizeBytes];
+
+        HKDF.Expand(HashAlgorithmName.SHA256, masterKey, encryptionKey, EncryptionInfo);
+        HKDF.Expand(HashAlgorithmName.SHA256, masterKey, verificationHash, VerificationInfo);
+
+        return new DerivedKeys(encryptionKey, verificationHash);
+    }
+
+    /// <summary>
+    /// 對應規格文件 3.3 節步驟 3～5：把 DeriveMasterKey + SplitMasterKey 串起來的便利方法，
+    /// 並在切分完成後主動清空記憶體中的主金鑰（規格文件第 8 節安全性考量）。
+    /// LockService.EncryptAsync / DecryptAsync 應該呼叫這個方法，而不是分開呼叫上面兩個。
+    /// </summary>
+    public static DerivedKeys DeriveKeys(
+        string password,
+        byte[] salt,
+        int timeCost = KeyDerivationDefaults.TimeCost,
+        int memoryCostKb = KeyDerivationDefaults.MemoryCostKb,
+        int parallelism = KeyDerivationDefaults.Parallelism)
+    {
+        var masterKey = DeriveMasterKey(password, salt, timeCost, memoryCostKb, parallelism);
+        try
+        {
+            return SplitMasterKey(masterKey);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(masterKey);
+        }
+    }
+
+    /// <summary>
+    /// 對應規格文件 3.4 節步驟 3～4：重新用輸入的密碼衍生子金鑰，跟儲存在 .meta.json 的
+    /// PasswordVerificationHash 用固定時間比較（避免時序攻擊洩漏比對進度），驗證密碼是否正確。
+    /// 回傳值同時給呼叫端「密碼對不對」的結果，以及對的話拿到的 EncryptionKey，不用再算第二次。
+    /// </summary>
+    public static (bool IsValid, byte[]? EncryptionKey) VerifyPassword(
+        string password,
+        byte[] salt,
+        byte[] storedVerificationHash,
+        int timeCost = KeyDerivationDefaults.TimeCost,
+        int memoryCostKb = KeyDerivationDefaults.MemoryCostKb,
+        int parallelism = KeyDerivationDefaults.Parallelism)
+    {
+        var derived = DeriveKeys(password, salt, timeCost, memoryCostKb, parallelism);
+        var isValid = CryptographicOperations.FixedTimeEquals(derived.VerificationHash, storedVerificationHash);
+
+        if (isValid)
+        {
+            return (true, derived.EncryptionKey);
+        }
+
+        CryptographicOperations.ZeroMemory(derived.EncryptionKey);
+        return (false, null);
     }
 }
