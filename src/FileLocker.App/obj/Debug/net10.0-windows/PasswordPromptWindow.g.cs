@@ -99,7 +99,7 @@ namespace FileLocker.App {
                 return;
             }
             _contentLoaded = true;
-            System.Uri resourceLocater = new System.Uri("/FileLocker.App;component/passwordpromptwindow.xaml", System.UriKind.Relative);
+            System.Uri resourceLocater = new System.Uri("/FileLocker.App;V1.0.0.0;component/passwordpromptwindow.xaml", System.UriKind.Relative);
             
             #line 1 "..\..\..\PasswordPromptWindow.xaml"
             System.Windows.Application.LoadComponent(this, resourceLocater);
