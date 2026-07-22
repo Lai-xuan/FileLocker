@@ -13,23 +13,17 @@ public partial class MainWindow : Window
     private readonly HistoryLogger _historyLogger;
     private readonly LockService _lockService;
 
-    public MainWindow()
+    /// <summary>
+    /// VaultManager／LockService 現在由 App.xaml.cs 統一建立、傳進來——這樣主視窗跟密碼小視窗
+    /// 用的是同一份 Vault／History 設定，不會各自重複建立、路徑卻可能不小心兜不起來。
+    /// </summary>
+    public MainWindow(VaultManager vaultManager, HistoryLogger historyLogger, LockService lockService)
     {
         InitializeComponent();
 
-        var appDataDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "FileLocker");
-
-        var vaultPath = Path.Combine(appDataDir, "Vault");
-        Directory.CreateDirectory(vaultPath);
-        _vaultManager = new VaultManager(vaultPath);
-
-        // 使用紀錄刻意存在 Vault 外面（appDataDir 底下，不是 vaultPath 底下），
-        // 因為它是本機的操作留痕，不應該隨 Vault 被雲端同步分享出去。
-        _historyLogger = new HistoryLogger(Path.Combine(appDataDir, "history.jsonl"));
-
-        _lockService = new LockService(_vaultManager, _historyLogger);
+        _vaultManager = vaultManager;
+        _historyLogger = historyLogger;
+        _lockService = lockService;
 
         Loaded += async (_, _) =>
         {

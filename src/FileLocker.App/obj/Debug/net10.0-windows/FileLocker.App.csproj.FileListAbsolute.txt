@@ -34,3 +34,5 @@ D:\FileLocker_專案\FileLocker\src\FileLocker.App\bin\Debug\net10.0-windows\Mic
 D:\FileLocker_專案\FileLocker\src\FileLocker.App\bin\Debug\net10.0-windows\Microsoft.Web.WebView2.WinForms.xml
 D:\FileLocker_專案\FileLocker\src\FileLocker.App\bin\Debug\net10.0-windows\Microsoft.Web.WebView2.Wpf.xml
 D:\FileLocker_專案\FileLocker\src\FileLocker.App\obj\Debug\net10.0-windows\FileLocker.App_Content.g.cs
+D:\FileLocker_專案\FileLocker\src\FileLocker.App\obj\Debug\net10.0-windows\PasswordPromptWindow.baml
+D:\FileLocker_專案\FileLocker\src\FileLocker.App\obj\Debug\net10.0-windows\PasswordPromptWindow.g.cs
