@@ -13,8 +13,6 @@ namespace FileLocker.Core;
 /// </summary>
 public class LockService
 {
-    // 密文檔案內部佈局：[Nonce(12 bytes)][Tag(16 bytes)][Ciphertext(其餘)]，
-    // 跟規格文件 3.1 節描述的邏輯欄位一致，只是這裡把 Header/Salt/Argon2 參數改放在 .meta.json（第 4 節的調整）。
     private const int HeaderLength = AesGcmCipher.NonceSizeBytes + AesGcmCipher.TagSizeBytes;
 
     private readonly VaultManager _vault;
@@ -24,10 +22,6 @@ public class LockService
         _vault = vault;
     }
 
-    /// <summary>
-    /// 對應 3.3 節完整流程。大型檔案/資料夾的壓縮與加解密都是同步 CPU/IO 密集工作，
-    /// 包在 Task.Run 裡讓呼叫端（GUI）可以用 await 而不會卡住介面執行緒。
-    /// </summary>
     public Task<LockResult> EncryptAsync(string path, string password, string? hint, IProgress<double>? progress = null)
         => Task.Run(() => EncryptCore(path, password, hint));
 
@@ -50,7 +44,6 @@ public class LockService
         {
             if (isFolder)
             {
-                // 對應規格文件 3.2 節「巢狀 .locked 項目」：加密前先掃描，記下裡面本來就存在的鎖定項目。
                 foreach (var nestedMarkerPath in FolderArchiver.FindNestedLockedFiles(path))
                 {
                     var nestedMarker = LockedMarkerFile.ReadFrom(nestedMarkerPath);
@@ -72,7 +65,7 @@ public class LockService
                 ? Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
                 : Path.GetFileName(path);
 
-            var markerPath = GetMarkerPath(path, isFolder);
+            var markerPath = ComputeMarkerPath(path, isFolder);
             if (File.Exists(markerPath))
             {
                 return new LockResult(false, "", "", $"目標位置已經有一個指標檔了：{markerPath}");
@@ -127,7 +120,6 @@ public class LockService
             var marker = LockedMarkerFile.Create(uuid, signingKey);
             marker.WriteTo(markerPath);
 
-            // 加密內容已經安全寫入 Vault，這裡才清除原始明文——順序很重要，避免加密途中出錯卻已經刪了原始資料。
             if (isFolder)
             {
                 SecureFileEraser.OverwriteAndDeleteFolder(path);
@@ -152,11 +144,6 @@ public class LockService
         }
     }
 
-    /// <summary>
-    /// 對應 3.4 節完整流程：讀 marker → 驗證簽章 → Argon2 重新衍生 → 比對驗證雜湊 → AES-GCM 解密驗證 Tag →
-    /// 視型別決定直接寫回還是先 ExtractZipToFolder → 還原原始名稱 → 刪除 Vault 內對應項目與 marker。
-    /// 密碼錯誤或簽章驗證失敗都回傳 Success=false + 對應 ErrorMessage，不拋例外給呼叫端接。
-    /// </summary>
     public Task<UnlockResult> DecryptAsync(string lockedMarkerPath, string password)
         => Task.Run(() => DecryptCore(lockedMarkerPath, password));
 
@@ -273,12 +260,6 @@ public class LockService
         }
     }
 
-    /// <summary>
-    /// 對應規格文件 3.2 節「刪除紀錄時，改成預設直接擋下來」：
-    /// 若 ContainsNestedLocks 不是空的且 force=false，回傳 BlockedByNestedLocks=true，
-    /// 讓 UI 顯示白話提示，不提供任何情況下的「一鍵強制刪除」入口——
-    /// force 參數只保留給未來如果真的需要例外處理時用，預設呼叫永遠是 force=false。
-    /// </summary>
     public Task<DeleteRecordResult> TryDeleteRecordAsync(string uuid, bool force = false)
         => Task.Run(() =>
         {
@@ -297,7 +278,41 @@ public class LockService
             return new DeleteRecordResult(true, false);
         });
 
-    private static string GetMarkerPath(string originalPath, bool isFolder)
+    /// <summary>
+    /// 對應清單頁「盡力而為」的指標檔狀態檢查：只檢查 metadata.OriginalPath 反推出來的預期位置，
+    /// 檢查那裡現在是否還有一個屬於這個 UUID 的 .locked 檔案。使用者若把 .locked 搬到別的地方，
+    /// 這裡就檢查不到、會回報「找不到」——這不代表資料真的遺失（Vault 裡的 .enc 還在），
+    /// 只是無法確認目前 .locked 指標檔實際在哪裡。
+    /// </summary>
+    public MarkerStatus CheckMarkerStatus(LockedItemMetadata metadata)
+    {
+        var expectedPath = ComputeMarkerPath(metadata.OriginalPath, metadata.Type == ItemType.Folder);
+
+        if (!File.Exists(expectedPath))
+        {
+            return new MarkerStatus(false, null, "在原本的位置找不到指標檔，可能已被移動或刪除");
+        }
+
+        var marker = LockedMarkerFile.ReadFrom(expectedPath);
+        if (marker is null)
+        {
+            return new MarkerStatus(false, null, "原本位置的檔案無法解析為指標檔");
+        }
+
+        if (marker.Uuid != metadata.Uuid)
+        {
+            // 那個位置現在的 .locked 檔案是別的項目的（例如使用者在同樣位置又加密了別的東西）。
+            return new MarkerStatus(false, null, "原本的位置已經被別的加密項目取代");
+        }
+
+        return new MarkerStatus(true, expectedPath, null);
+    }
+
+    /// <summary>
+    /// 從原始路徑推算對應的 .locked 指標檔應該在哪裡：同一個父資料夾，副檔名整個換成 .locked
+    /// （檔案是把原副檔名拿掉，資料夾是直接接在資料夾名稱後面）。EncryptCore 跟 CheckMarkerStatus 共用。
+    /// </summary>
+    public static string ComputeMarkerPath(string originalPath, bool isFolder)
     {
         var trimmedPath = originalPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         var parentDir = isFolder
