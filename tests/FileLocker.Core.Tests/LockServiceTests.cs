@@ -1,3 +1,4 @@
+using FileLocker.Core.History;
 using FileLocker.Core.Models;
 using FileLocker.Core.Vault;
 using Xunit;
@@ -8,19 +9,24 @@ public class LockServiceTests : IDisposable
 {
     private readonly DirectoryInfo _vaultDir;
     private readonly DirectoryInfo _workDir; // 模擬使用者的「文件」資料夾
+    private readonly DirectoryInfo _historyDir;
+    private readonly HistoryLogger _history;
     private readonly LockService _service;
 
     public LockServiceTests()
     {
         _vaultDir = Directory.CreateTempSubdirectory("FileLockerVault_");
         _workDir = Directory.CreateTempSubdirectory("FileLockerWork_");
-        _service = new LockService(new VaultManager(_vaultDir.FullName));
+        _historyDir = Directory.CreateTempSubdirectory("FileLockerHistory_");
+        _history = new HistoryLogger(Path.Combine(_historyDir.FullName, "history.jsonl"));
+        _service = new LockService(new VaultManager(_vaultDir.FullName), _history);
     }
 
     public void Dispose()
     {
         if (_vaultDir.Exists) _vaultDir.Delete(recursive: true);
         if (_workDir.Exists) _workDir.Delete(recursive: true);
+        if (_historyDir.Exists) _historyDir.Delete(recursive: true);
     }
 
     [Fact]
@@ -213,6 +219,86 @@ public class LockServiceTests : IDisposable
         finally
         {
             elsewhereDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DecryptByUuidAsync_WithCorrectPassword_RestoresContentAndRemovesExistingMarker()
+    {
+        var filePath = Path.Combine(_workDir.FullName, "清單解密測試.txt");
+        File.WriteAllText(filePath, "透過清單直接解密");
+        var lockResult = await _service.EncryptAsync(filePath, "password", null);
+        Assert.True(File.Exists(lockResult.LockedMarkerPath));
+
+        var unlockResult = await _service.DecryptByUuidAsync(lockResult.Uuid, "password");
+
+        Assert.True(unlockResult.Success);
+        Assert.Equal(filePath, unlockResult.RestoredPath);
+        Assert.Equal("透過清單直接解密", File.ReadAllText(filePath));
+        Assert.False(File.Exists(lockResult.LockedMarkerPath)); // marker 應該被一併清掉
+    }
+
+    [Fact]
+    public async Task DecryptByUuidAsync_WhenMarkerAlreadyMovedAway_StillSucceedsAndLeavesMovedMarkerAlone()
+    {
+        var filePath = Path.Combine(_workDir.FullName, "指標檔被搬走.txt");
+        File.WriteAllText(filePath, "內容");
+        var lockResult = await _service.EncryptAsync(filePath, "password", null);
+
+        var elsewhere = Directory.CreateTempSubdirectory("FileLockerElsewhere2_");
+        try
+        {
+            var movedMarkerPath = Path.Combine(elsewhere.FullName, "指標檔被搬走.locked");
+            File.Move(lockResult.LockedMarkerPath, movedMarkerPath);
+
+            var unlockResult = await _service.DecryptByUuidAsync(lockResult.Uuid, "password");
+
+            Assert.True(unlockResult.Success);
+            Assert.True(File.Exists(movedMarkerPath)); // 別的地方那份不屬於檢查範圍，不會被動到
+        }
+        finally
+        {
+            elsewhere.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task EncryptAsync_ThenDecryptAsync_AppendsHistoryEntries()
+    {
+        var filePath = Path.Combine(_workDir.FullName, "歷史紀錄測試.txt");
+        File.WriteAllText(filePath, "內容");
+        var lockResult = await _service.EncryptAsync(filePath, "password", "提示文字");
+        await _service.DecryptAsync(lockResult.LockedMarkerPath, "password");
+
+        var entries = _history.ReadAll();
+
+        Assert.Contains(entries, entry => entry.Uuid == lockResult.Uuid && entry.Action == HistoryAction.Encrypted);
+        Assert.Contains(entries, entry => entry.Uuid == lockResult.Uuid && entry.Action == HistoryAction.Decrypted);
+    }
+
+    [Fact]
+    public async Task DecryptByUuidAsync_WithCustomDestination_RestoresThereInsteadOfOriginalLocation()
+    {
+        var filePath = Path.Combine(_workDir.FullName, "自訂位置解密測試.txt");
+        File.WriteAllText(filePath, "自訂還原位置");
+        var lockResult = await _service.EncryptAsync(filePath, "password", null);
+
+        var customDestDir = Directory.CreateTempSubdirectory("FileLockerCustomDest_");
+        try
+        {
+            var unlockResult = await _service.DecryptByUuidAsync(lockResult.Uuid, "password", customDestDir.FullName);
+
+            Assert.True(unlockResult.Success);
+            var expectedRestoredPath = Path.Combine(customDestDir.FullName, "自訂位置解密測試.txt");
+            Assert.Equal(expectedRestoredPath, unlockResult.RestoredPath);
+            Assert.True(File.Exists(expectedRestoredPath));
+            Assert.Equal("自訂還原位置", File.ReadAllText(expectedRestoredPath));
+            Assert.False(File.Exists(filePath)); // 原始位置不會出現還原的檔案
+            Assert.False(File.Exists(lockResult.LockedMarkerPath)); // 原始位置的指標檔還是會被正確清掉
+        }
+        finally
+        {
+            customDestDir.Delete(recursive: true);
         }
     }
 }

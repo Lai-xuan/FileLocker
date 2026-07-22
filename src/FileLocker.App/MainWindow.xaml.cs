@@ -2,6 +2,7 @@
 using System.Text.Json;
 using System.Windows;
 using FileLocker.Core;
+using FileLocker.Core.History;
 using FileLocker.Core.Vault;
 
 namespace FileLocker.App;
@@ -9,18 +10,26 @@ namespace FileLocker.App;
 public partial class MainWindow : Window
 {
     private readonly VaultManager _vaultManager;
+    private readonly HistoryLogger _historyLogger;
     private readonly LockService _lockService;
 
     public MainWindow()
     {
         InitializeComponent();
 
-        var vaultPath = Path.Combine(
+        var appDataDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "FileLocker", "Vault");
+            "FileLocker");
+
+        var vaultPath = Path.Combine(appDataDir, "Vault");
         Directory.CreateDirectory(vaultPath);
         _vaultManager = new VaultManager(vaultPath);
-        _lockService = new LockService(_vaultManager);
+
+        // 使用紀錄刻意存在 Vault 外面（appDataDir 底下，不是 vaultPath 底下），
+        // 因為它是本機的操作留痕，不應該隨 Vault 被雲端同步分享出去。
+        _historyLogger = new HistoryLogger(Path.Combine(appDataDir, "history.jsonl"));
+
+        _lockService = new LockService(_vaultManager, _historyLogger);
 
         Loaded += async (_, _) =>
         {
@@ -48,16 +57,24 @@ public partial class MainWindow : Window
                     await HandleDecryptRequestAsync(root);
                     break;
 
+                case "decryptByUuid":
+                    await HandleDecryptByUuidRequestAsync(root);
+                    break;
+
                 case "pickFile":
                     HandlePickFile(root);
                     break;
 
                 case "pickFolder":
-                    HandlePickFolder();
+                    HandlePickFolder(root);
                     break;
 
                 case "listVault":
                     await HandleListVaultRequestAsync();
+                    break;
+
+                case "listHistory":
+                    HandleListHistoryRequest();
                     break;
 
                 case "deleteRecord":
@@ -110,20 +127,39 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 對應規格文件第 4 節：掃描 Vault 內所有 .meta.json 組成清單。ScanAll 本身是同步的檔案 I/O，
-    /// 包進 Task.Run 避免項目數量多時卡住 UI 執行緒。
+    /// 對應「已加密清單」頁直接選項目解密，不需要使用者先手動找到 .locked 檔案。
     /// </summary>
+    private async Task HandleDecryptByUuidRequestAsync(JsonElement request)
+    {
+        var uuid = request.GetProperty("uuid").GetString() ?? "";
+        var password = request.GetProperty("password").GetString() ?? "";
+        var destinationDir = request.TryGetProperty("destinationDir", out var destProp) && destProp.ValueKind == JsonValueKind.String
+            ? destProp.GetString()
+            : null;
+
+        var result = await _lockService.DecryptByUuidAsync(uuid, password, destinationDir);
+
+        SendToFrontend(new
+        {
+            type = "decryptByUuidResult",
+            uuid,
+            success = result.Success,
+            restoredPath = result.RestoredPath,
+            errorMessage = result.ErrorMessage
+        });
+    }
+
     private async Task HandleListVaultRequestAsync()
     {
         var items = await Task.Run(() => _vaultManager.ScanAll()
             .Select(m =>
             {
-                // 對應第 4 節「盡力而為」的檢查：只確認原本位置現在還在不在，不做全磁碟掃描。
                 var markerStatus = _lockService.CheckMarkerStatus(m);
                 return new
                 {
                     uuid = m.Uuid,
                     originalName = m.OriginalName,
+                    originalPath = m.OriginalPath,
                     type = m.Type.ToString(),
                     originalSizeBytes = m.OriginalSizeBytes,
                     hint = m.Hint,
@@ -140,10 +176,23 @@ public partial class MainWindow : Window
         SendToFrontend(new { type = "vaultList", items });
     }
 
-    /// <summary>
-    /// 對應規格文件 3.2 節「刪除紀錄時，改成預設直接擋下來」：呼叫 LockService.TryDeleteRecordAsync，
-    /// 有巢狀鎖定就回傳擋下的結果讓前端顯示白話提示，不在這一層額外做任何強制刪除的旁路。
-    /// </summary>
+    /// <summary>對應「使用紀錄」子頁籤：跟 Vault 目前狀態無關，單純把本機累積的操作日誌全部讀出來。</summary>
+    private void HandleListHistoryRequest()
+    {
+        var entries = _historyLogger.ReadAll()
+            .OrderByDescending(entry => entry.TimestampUtc)
+            .Select(entry => new
+            {
+                uuid = entry.Uuid,
+                originalName = entry.OriginalName,
+                action = entry.Action.ToString(),
+                timestampUtc = entry.TimestampUtc,
+                detail = entry.Detail
+            });
+
+        SendToFrontend(new { type = "historyList", items = entries });
+    }
+
     private async Task HandleDeleteRecordRequestAsync(JsonElement request)
     {
         var uuid = request.GetProperty("uuid").GetString() ?? "";
@@ -185,20 +234,22 @@ public partial class MainWindow : Window
         }
     }
 
-    private void HandlePickFolder()
+    private void HandlePickFolder(JsonElement request)
     {
+        var purpose = request.TryGetProperty("purpose", out var purposeProp) ? purposeProp.GetString() : "encryptPath";
+
         var dialog = new Microsoft.Win32.OpenFolderDialog
         {
-            Title = "選擇要加密的資料夾"
+            Title = purpose == "decryptDestination" ? "選擇要還原到哪個資料夾" : "選擇要加密的資料夾"
         };
 
         if (dialog.ShowDialog(this) == true)
         {
-            SendToFrontend(new { type = "pathPicked", purpose = "encryptPath", path = dialog.FolderName });
+            SendToFrontend(new { type = "pathPicked", purpose, path = dialog.FolderName });
         }
         else
         {
-            SendToFrontend(new { type = "pathPickCancelled", purpose = "encryptPath" });
+            SendToFrontend(new { type = "pathPickCancelled", purpose });
         }
     }
 
