@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/FileLocker.Cli/FileLocker.Cli.csproj" />
     <Project Path="src/FileLocker.Core/FileLocker.Core.csproj" />
   </Folder>
   <Folder Name="/tests/">
