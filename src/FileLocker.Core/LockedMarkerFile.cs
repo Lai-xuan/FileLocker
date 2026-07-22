@@ -1,5 +1,6 @@
 using System.Text.Json;
 using FileLocker.Core.Crypto;
+using FileLocker.Core.Io;
 
 namespace FileLocker.Core;
 
@@ -22,7 +23,7 @@ public class LockedMarkerFile
     public void WriteTo(string path)
     {
         var json = JsonSerializer.Serialize(this);
-        File.WriteAllText(path, json);
+        AtomicFile.WriteAllText(path, json);
     }
 
     /// <summary>

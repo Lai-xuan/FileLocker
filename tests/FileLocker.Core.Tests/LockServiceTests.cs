@@ -301,4 +301,23 @@ public class LockServiceTests : IDisposable
             customDestDir.Delete(recursive: true);
         }
     }
+
+    [Fact]
+    public async Task EncryptAsync_WhenOriginalFileCannotBeDeleted_StillReportsSuccessWithWarning()
+    {
+        // 對應修掉的 bug：加密內容已經安全寫進 Vault 之後，只是清除原始檔案這個收尾動作失敗，
+        // 不應該讓整個結果被回報成「加密失敗」。用另一個檔案控制代碼鎖住檔案，模擬刪除失敗的情境。
+        var filePath = Path.Combine(_workDir.FullName, "被鎖住的檔案.txt");
+        File.WriteAllText(filePath, "內容");
+
+        using (new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            var result = await _service.EncryptAsync(filePath, "password", null);
+
+            Assert.True(result.Success);
+            Assert.NotNull(result.ErrorMessage);
+            Assert.True(File.Exists(result.LockedMarkerPath)); // marker 有正常產生，代表加密內容確實寫入成功
+            Assert.NotNull(new VaultManager(_vaultDir.FullName).LoadMetadata(result.Uuid)); // Vault 裡的紀錄也在
+        }
+    }
 }

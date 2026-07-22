@@ -40,9 +40,15 @@ if (isRunningInWebView2) {
     if (data.type === 'encryptResult') {
       isEncrypting.value = false
       encryptResultIsError.value = !data.success
-      encryptResultMessage.value = data.success
-        ? `加密成功！指標檔位置：${data.lockedMarkerPath}`
-        : `加密失敗：${data.errorMessage}`
+      if (data.success) {
+        // errorMessage 在成功時如果有值，代表加密內容已經安全寫入，只是收尾清除原始檔案時出了狀況，
+        // 是提醒使用者手動處理，不是加密真的失敗。
+        encryptResultMessage.value = data.errorMessage
+          ? `加密成功，但有提醒：${data.errorMessage}`
+          : `加密成功！指標檔位置：${data.lockedMarkerPath}`
+      } else {
+        encryptResultMessage.value = `加密失敗：${data.errorMessage}`
+      }
     } else if (data.type === 'decryptResult') {
       isDecrypting.value = false
       decryptResultIsError.value = !data.success

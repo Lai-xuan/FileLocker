@@ -127,18 +127,30 @@ public class LockService
             var marker = LockedMarkerFile.Create(uuid, signingKey);
             marker.WriteTo(markerPath);
 
-            if (isFolder)
+            // 到這裡，加密內容、metadata、marker 都已經成功寫入——資料本身已經安全了。
+            // 清除原始明文是「收尾」動作，這一步就算失敗，也不代表加密本身失敗，
+            // 所以特別包一層自己的 try/catch，不讓它跟著外層的 catch 把整個結果判定成失敗
+            // （否則使用者會看到「加密失敗」，卻不知道其實 Vault 裡已經有一份有效的加密紀錄了）。
+            string? cleanupWarning = null;
+            try
             {
-                SecureFileEraser.OverwriteAndDeleteFolder(path);
+                if (isFolder)
+                {
+                    SecureFileEraser.OverwriteAndDeleteFolder(path);
+                }
+                else
+                {
+                    SecureFileEraser.OverwriteAndDelete(path);
+                }
             }
-            else
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                SecureFileEraser.OverwriteAndDelete(path);
+                cleanupWarning = $"加密已完成，但清除原始檔案時發生錯誤，請手動確認並刪除原始檔案：{ex.Message}";
             }
 
             _history?.Append(new HistoryEntry(uuid, originalName, HistoryAction.Encrypted, DateTimeOffset.UtcNow, hint));
 
-            return new LockResult(true, uuid, markerPath);
+            return new LockResult(true, uuid, markerPath, cleanupWarning);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -198,15 +210,12 @@ public class LockService
 
     /// <summary>
     /// 對應「已加密清單」頁直接選項目解密：不需要事先找到 .locked 檔案，直接用 UUID 從 Vault 解密。
-    /// 解密成功後，反推出原本 .locked 應該在的位置，檢查那裡現在還有沒有東西——
-    /// 有（而且真的是同一個 UUID）就清掉，避免留下一個已經失效、會誤導使用者的指標檔；
-    /// 沒有就跳過，不當成錯誤。
-    /// </summary>
-    /// <summary>
-    /// destinationDir 為 null 時（使用者選擇「還原到原始位置」），退而求其次用加密當下記錄的
-    /// 原始路徑所在的資料夾；使用者若指定了 destinationDir（自己選了另一個地方存），就用那個位置。
-    /// 不論還原到哪裡，指標檔的檢查與清除（見下方）永遠是根據「原始位置」判斷，跟這次實際存去哪裡無關——
-    /// 因為 .locked 指標檔本來就只可能出現在原始位置，不會出現在使用者這次選的新位置。
+    /// destinationDir 為 null 時（使用者選擇「還原到原始位置」），退而求其次用加密當下記錄的原始路徑
+    /// 所在的資料夾；使用者若指定了 destinationDir（自己選了另一個地方存），就用那個位置。
+    /// 不論還原到哪裡，解密成功後都會反推出原本 .locked 應該在的位置，檢查那裡現在還有沒有東西——
+    /// 有（而且真的是同一個 UUID）就清掉，避免留下一個已經失效、會誤導使用者的指標檔；沒有就跳過，不當成錯誤。
+    /// 這個檢查永遠是根據「原始位置」判斷，跟這次實際存去哪裡無關，因為 .locked 指標檔本來就只可能出現在
+    /// 原始位置，不會出現在使用者這次選的新位置。
     /// </summary>
     public Task<UnlockResult> DecryptByUuidAsync(string uuid, string password, string? destinationDir = null)
         => Task.Run(() => DecryptByUuidCore(uuid, password, destinationDir));

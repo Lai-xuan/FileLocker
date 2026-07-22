@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using FileLocker.Core.Io;
 using FileLocker.Core.Models;
 
 namespace FileLocker.Core.Vault;
@@ -48,7 +49,7 @@ public class VaultManager
         };
 
         var json = JsonSerializer.Serialize(newConfig, JsonOptions);
-        File.WriteAllText(ConfigPath, json);
+        AtomicFile.WriteAllText(ConfigPath, json);
 
         return newConfig;
     }
@@ -57,7 +58,7 @@ public class VaultManager
     {
         Directory.CreateDirectory(VaultPath);
         var json = JsonSerializer.Serialize(metadata, JsonOptions);
-        File.WriteAllText(MetaPath(metadata.Uuid), json);
+        AtomicFile.WriteAllText(MetaPath(metadata.Uuid), json);
     }
 
     /// <summary>找不到、或內容損毀，一律回傳 null，由呼叫端決定要顯示什麼錯誤訊息（不拋例外）。</summary>
@@ -125,14 +126,17 @@ public class VaultManager
         var encPath = EncPath(uuid);
         var metaPath = MetaPath(uuid);
 
-        if (File.Exists(encPath))
-        {
-            File.Delete(encPath);
-        }
-
+        // 先刪 metadata、後刪內容：如果中途中斷（斷電、當機），最壞情況只是留下一個沒人指向的 .enc
+        // （浪費一點空間，但不會誤導使用者），而不是留下一筆指向不存在內容的「幽靈」metadata——
+        // 那樣清單頁還是會顯示這筆項目，使用者點下去解密才會發現內容其實已經不見了。
         if (File.Exists(metaPath))
         {
             File.Delete(metaPath);
+        }
+
+        if (File.Exists(encPath))
+        {
+            File.Delete(encPath);
         }
     }
 

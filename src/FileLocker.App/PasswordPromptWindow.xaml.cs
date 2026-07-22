@@ -1,6 +1,5 @@
 using System.IO;
 using System.Windows;
-using System.Windows.Input;
 using FileLocker.Core;
 using FileLocker.Core.Vault;
 
@@ -36,15 +35,11 @@ public partial class PasswordPromptWindow : Window
         Loaded += (_, _) => PasswordInput.Focus();
     }
 
+    // UnlockButton 的 IsDefault="True" 已經讓 Enter 鍵觸發這個 Click 事件，
+    // 不需要再另外幫 PasswordInput 綁一個 KeyDown 處理——之前兩個機制同時存在時，
+    // 按一次 Enter 會讓 TryUnlockAsync 被呼叫兩次（事件冒泡到 Window 又被 IsDefault 機制多觸發一次一次），
+    // 等於密碼被驗證兩次，Argon2 又是刻意設計成慢的，等於白白讓使用者多等一倍時間。
     private async void UnlockButton_Click(object sender, RoutedEventArgs e) => await TryUnlockAsync();
-
-    private async void PasswordInput_KeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key == Key.Enter)
-        {
-            await TryUnlockAsync();
-        }
-    }
 
     private async Task TryUnlockAsync()
     {
