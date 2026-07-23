@@ -17,14 +17,18 @@ public partial class MainWindow : Window
     private readonly AppSettingsManager _settingsManager;
     private readonly AppSettings _settings;
     private readonly string _appDataDir;
+    private readonly List<string>? _initialPaths;
 
     /// <summary>
     /// VaultManager／LockService 現在由 App.xaml.cs 統一建立、傳進來——這樣主視窗跟密碼小視窗
     /// 用的是同一份 Vault／History 設定，不會各自重複建立、路徑卻可能不小心兜不起來。
+    /// initialPaths 是從 Shell Extension 右鍵選單過來的（可能是空的、一個，或多個路徑），
+    /// 等 WebView2 頁面真的載入完成才送給前端，避免前端還沒掛上訊息監聽器就漏接。
     /// </summary>
     public MainWindow(
         VaultManager vaultManager, HistoryLogger historyLogger, LockService lockService,
-        AppSettingsManager settingsManager, AppSettings settings, string appDataDir)
+        AppSettingsManager settingsManager, AppSettings settings, string appDataDir,
+        List<string>? initialPaths = null)
     {
         InitializeComponent();
 
@@ -34,12 +38,20 @@ public partial class MainWindow : Window
         _settingsManager = settingsManager;
         _settings = settings;
         _appDataDir = appDataDir;
+        _initialPaths = initialPaths;
 
         Loaded += async (_, _) =>
         {
             await MainWebView.EnsureCoreWebView2Async();
             MainWebView.CoreWebView2.Navigate("http://localhost:5173/");
             MainWebView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
+            MainWebView.CoreWebView2.NavigationCompleted += (_, args) =>
+            {
+                if (args.IsSuccess && _initialPaths is { Count: > 0 })
+                {
+                    SendToFrontend(new { type = "initialPaths", paths = _initialPaths });
+                }
+            };
         };
     }
 

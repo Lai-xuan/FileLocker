@@ -38,7 +38,7 @@ public partial class App : Application
         var lockoutTracker = new LockoutTracker(Path.Combine(appDataDir, "lockout.json"));
         var lockService = new LockService(vaultManager, historyLogger, lockoutTracker);
 
-        if (e.Args.Length > 0 && LooksLikeLockedFileArgument(e.Args[0]))
+        if (e.Args.Length == 1 && LooksLikeLockedFileArgument(e.Args[0]))
         {
             var promptWindow = new PasswordPromptWindow(e.Args[0], vaultManager, lockService);
             MainWindow = promptWindow;
@@ -46,7 +46,8 @@ public partial class App : Application
         }
         else
         {
-            var mainWindow = new MainWindow(vaultManager, historyLogger, lockService, settingsManager, settings, appDataDir);
+            var initialPaths = e.Args.Length > 0 ? ResolveInitialPaths(e.Args) : null;
+            var mainWindow = new MainWindow(vaultManager, historyLogger, lockService, settingsManager, settings, appDataDir, initialPaths);
             MainWindow = mainWindow;
             mainWindow.Show();
         }
@@ -54,4 +55,28 @@ public partial class App : Application
 
     private static bool LooksLikeLockedFileArgument(string arg)
         => File.Exists(arg) && string.Equals(Path.GetExtension(arg), ".locked", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 對應規格文件第 5.2 節：Shell Extension 選取數量/長度超過門檻時，不會把每個路徑各自當一個命令列參數，
+    /// 而是寫進一個暫存清單檔，只傳「@檔案路徑」這一個參數過來，這裡要反過來把清單讀出來。
+    /// </summary>
+    private static List<string> ResolveInitialPaths(string[] args)
+    {
+        if (args.Length == 1 && args[0].StartsWith('@'))
+        {
+            var listFilePath = args[0][1..];
+            try
+            {
+                return File.ReadAllLines(listFilePath)
+                    .Where(line => !string.IsNullOrWhiteSpace(line))
+                    .ToList();
+            }
+            catch (IOException)
+            {
+                return new List<string>();
+            }
+        }
+
+        return args.ToList();
+    }
 }

@@ -182,6 +182,16 @@ if (isRunningInWebView2) {
     } else if (data.type === 'updateSettingResult') {
       settingsSaveMessage.value = '已儲存。'
       setTimeout(() => { settingsSaveMessage.value = '' }, 2000)
+    } else if (data.type === 'initialPaths') {
+      // 從 Shell Extension 右鍵選單過來的路徑清單，先切到加密頁籤、帶入第一個路徑。
+      activeTab.value = 'encrypt'
+      if (data.paths && data.paths.length > 0) {
+        encryptPath.value = data.paths[0]
+        encryptResultIsError.value = false
+        encryptResultMessage.value = data.paths.length > 1
+          ? `從右鍵選單選了 ${data.paths.length} 個項目，目前先帶入第一個，一次加密多個項目的功能之後會補上。`
+          : ''
+      }
     }
   })
 }
