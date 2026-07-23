@@ -90,6 +90,25 @@ public partial class MainWindow : Window
         };
     }
 
+    /// <summary>
+    /// 對應單一執行個體機制（見 App.xaml.cs）：已經有這個視窗開著時，之後被 Mutex 擋下來、
+    /// 轉送過來的加密路徑清單就送進這裡，而不是另外開一個新的 MainWindow。
+    /// 順便把視窗搶回前景（可能被壓在其他視窗底下，或被縮到最小），讓使用者知道有新的東西進來了。
+    /// </summary>
+    public void ApplyIncomingPaths(List<string> paths)
+    {
+        Activate();
+        if (WindowState == WindowState.Minimized)
+        {
+            WindowState = WindowState.Normal;
+        }
+
+        if (paths.Count > 0)
+        {
+            SendToFrontend(new { type = "initialPaths", paths });
+        }
+    }
+
     private async void OnWebMessageReceived(object? sender, Microsoft.Web.WebView2.Core.CoreWebView2WebMessageReceivedEventArgs e)
     {
         try
