@@ -66,4 +66,11 @@ public class LockedItemMetadata
 
     /// <summary>用恢復金鑰衍生出的包裝金鑰加密過的內容金鑰（Base64），格式同 PasskeyWrappedContentKey。</summary>
     public string? RecoveryKeyWrappedContentKey { get; set; }
+
+    /// <summary>
+    /// 一次選多個項目加密時（不管是加密頁籤多選，還是 Shell Extension 右鍵多選），
+    /// 同一批全部會標上同一個隨機 ID，讓「已加密清單」頁可以把它們摺疊成一組顯示。
+    /// 單一項目加密時這裡是 null，代表不需要分組。
+    /// </summary>
+    public string? BatchId { get; set; }
 }

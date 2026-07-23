@@ -520,4 +520,44 @@ public class LockServiceTests : IDisposable
 
         Assert.True(result.Success);
     }
+
+    [Fact]
+    public async Task EncryptAsync_WithBatchId_StoresItInMetadata()
+    {
+        var filePath = Path.Combine(_workDir.FullName, "批次測試.txt");
+        File.WriteAllText(filePath, "內容");
+        var batchId = Guid.NewGuid().ToString();
+
+        var result = await _service.EncryptAsync(filePath, "password", null, batchId: batchId);
+
+        var metadata = new VaultManager(_vaultDir.FullName).LoadMetadata(result.Uuid);
+        Assert.Equal(batchId, metadata!.BatchId);
+    }
+
+    [Fact]
+    public async Task EncryptAsync_WithoutBatchId_LeavesItNull()
+    {
+        var filePath = Path.Combine(_workDir.FullName, "非批次測試.txt");
+        File.WriteAllText(filePath, "內容");
+
+        var result = await _service.EncryptAsync(filePath, "password", null);
+
+        var metadata = new VaultManager(_vaultDir.FullName).LoadMetadata(result.Uuid);
+        Assert.Null(metadata!.BatchId);
+    }
+
+    [Fact]
+    public async Task TryDeleteRecordAsync_OnSuccess_AlsoRemovesLockedMarkerAtOriginalLocation()
+    {
+        var filePath = Path.Combine(_workDir.FullName, "刪除紀錄測試.txt");
+        File.WriteAllText(filePath, "內容");
+        var lockResult = await _service.EncryptAsync(filePath, "password", null);
+        Assert.True(File.Exists(lockResult.LockedMarkerPath));
+
+        var deleteResult = await _service.TryDeleteRecordAsync(lockResult.Uuid);
+
+        Assert.True(deleteResult.Success);
+        Assert.False(File.Exists(lockResult.LockedMarkerPath)); // 失效的指標檔應該一併被清掉
+        Assert.Null(new VaultManager(_vaultDir.FullName).LoadMetadata(lockResult.Uuid));
+    }
 }

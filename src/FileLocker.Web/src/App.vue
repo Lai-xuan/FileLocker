@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 
 const activeTab = ref('encrypt')
 const activeListSubTab = ref('files') // 'files' | 'history'
@@ -12,7 +12,7 @@ const settingsSaveMessage = ref('')
 const isChangingVaultPath = ref(false)
 
 // ---- 加密頁籤 ----
-const encryptPath = ref('')
+const encryptPaths = ref([])
 const encryptPassword = ref('')
 const hint = ref('')
 const enablePasskey = ref(false)
@@ -20,8 +20,8 @@ const enableRecoveryKey = ref(false)
 const recoveryKeyDisplay = ref('') // 非空字串時顯示恢復金鑰彈窗
 const recoveryKeySaveState = ref('') // '' | 'saved' | 'acknowledged'
 const isEncrypting = ref(false)
-const encryptResultMessage = ref('')
-const encryptResultIsError = ref(false)
+const encryptBatchTotal = ref(0)
+const encryptItemResults = ref([]) // 批次加密逐項回報的結果
 
 // ---- 解密頁籤 ----
 const decryptPath = ref('')
@@ -35,6 +35,8 @@ const decryptItemInfo = ref(null) // { uuid, originalName, hint, passkeyEnabled,
 const vaultItems = ref([])
 const isLoadingList = ref(false)
 const decryptingUuids = ref(new Set())
+const expandedGroups = ref(new Set())
+const decryptingBatchIds = ref(new Set())
 
 // ---- 使用紀錄子頁籤 ----
 const historyItems = ref([])
@@ -56,33 +58,29 @@ if (isRunningInWebView2) {
   window.chrome.webview.addEventListener('message', (event) => {
     const data = event.data
 
-    if (data.type === 'encryptResult') {
-      isEncrypting.value = false
-      encryptResultIsError.value = !data.success
-      if (data.success) {
-        // errorMessage 在成功時如果有值，代表加密內容已經安全寫入，只是收尾清除原始檔案時出了狀況，
-        // 是提醒使用者手動處理，不是加密真的失敗。
-        let message = data.errorMessage
-          ? `加密成功，但有提醒：${data.errorMessage}`
-          : `加密成功！指標檔位置：${data.lockedMarkerPath}`
-
-        // 使用者勾了要開 Passkey，但實際上沒有真的啟用成功（裝置不支援、驗證中途取消都有可能），
-        // 一定要講清楚，不能讓使用者誤以為多了一層保護但其實沒有。
-        if (data.passkeyRequested && !data.passkeyEnabled) {
-          message += '\n\n⚠️ Passkey 快速解鎖沒有成功啟用（可能是這台裝置不支援，或驗證過程被取消），目前只有密碼保護這個項目。'
-        } else if (data.passkeyEnabled) {
-          message += '\n\n✅ Passkey 快速解鎖已啟用。'
-        }
-
-        encryptResultMessage.value = message
-
-        if (data.recoveryKey) {
-          recoveryKeyDisplay.value = data.recoveryKey
-          recoveryKeySaveState.value = ''
-        }
-      } else {
-        encryptResultMessage.value = `加密失敗：${data.errorMessage}`
+    if (data.type === 'encryptBatchStarted') {
+      encryptBatchTotal.value = data.totalCount
+      encryptItemResults.value = []
+    } else if (data.type === 'encryptItemResult') {
+      let note = ''
+      if (data.passkeyRequested && !data.passkeyEnabled) {
+        note = 'Passkey 未成功啟用（裝置不支援或驗證被取消），只有密碼保護。'
+      } else if (data.passkeyEnabled) {
+        note = 'Passkey 已啟用。'
       }
+      encryptItemResults.value.push({
+        path: data.path,
+        success: data.success,
+        errorMessage: data.errorMessage,
+        note
+      })
+      if (data.recoveryKey) {
+        recoveryKeyDisplay.value = data.recoveryKey
+        recoveryKeySaveState.value = ''
+      }
+    } else if (data.type === 'encryptBatchDone') {
+      isEncrypting.value = false
+      encryptPaths.value = []
     } else if (data.type === 'decryptResult') {
       isDecrypting.value = false
       decryptResultIsError.value = !data.success
@@ -113,6 +111,24 @@ if (isRunningInWebView2) {
       } else {
         alert(`恢復金鑰解密失敗：${data.errorMessage}`)
       }
+    } else if (data.type === 'decryptBatchStarted') {
+      // totalCount 目前先不用另外存，逐項回報時直接從 vaultItems 篩掉即可。
+    } else if (data.type === 'decryptBatchItemResult') {
+      if (data.success) {
+        vaultItems.value = vaultItems.value.filter((item) => item.uuid !== data.uuid)
+      }
+    } else if (data.type === 'decryptBatchDone') {
+      // 找出這批是哪個 batchId（此時對應項目如果全部成功，vaultItems 裡已經不會再有它們了）。
+      for (const batchId of decryptingBatchIds.value) {
+        const stillHasItems = vaultItems.value.some((item) => item.batchId === batchId)
+        if (!stillHasItems) {
+          decryptingBatchIds.value.delete(batchId)
+        }
+      }
+      decryptingBatchIds.value.clear()
+      if (data.successCount < data.totalCount) {
+        alert(`批次解鎖完成：${data.successCount} / ${data.totalCount} 個成功，其餘的密碼可能不正確或有其他問題，可以展開個別重試。`)
+      }
     } else if (data.type === 'saveRecoveryKeyToFileResult') {
       if (data.success) {
         recoveryKeySaveState.value = 'saved'
@@ -128,8 +144,7 @@ if (isRunningInWebView2) {
       isDecrypting.value = false
       isLoadingList.value = false
       isLoadingHistory.value = false
-      encryptResultIsError.value = true
-      encryptResultMessage.value = `發生錯誤：${data.message}`
+      encryptItemResults.value.push({ path: '', success: false, errorMessage: `發生錯誤：${data.message}`, note: '' })
     } else if (data.type === 'pathPicked') {
       if (data.purpose === 'decryptPath') {
         decryptPath.value = data.path
@@ -152,7 +167,17 @@ if (isRunningInWebView2) {
         isChangingVaultPath.value = true
         window.chrome.webview.postMessage({ type: 'changeVaultPath', newPath: data.path })
       } else {
-        encryptPath.value = data.path
+        // 資料夾選擇（單選）走這裡，加到清單裡而不是取代整份清單。
+        if (!encryptPaths.value.includes(data.path)) {
+          encryptPaths.value.push(data.path)
+        }
+      }
+    } else if (data.type === 'pathsPicked') {
+      // 加密頁籤的「選擇檔案」允許多選，選完的路徑合併進現有清單（去除重複）。
+      for (const path of data.paths) {
+        if (!encryptPaths.value.includes(path)) {
+          encryptPaths.value.push(path)
+        }
       }
     } else if (data.type === 'vaultList') {
       isLoadingList.value = false
@@ -183,14 +208,10 @@ if (isRunningInWebView2) {
       settingsSaveMessage.value = '已儲存。'
       setTimeout(() => { settingsSaveMessage.value = '' }, 2000)
     } else if (data.type === 'initialPaths') {
-      // 從 Shell Extension 右鍵選單過來的路徑清單，先切到加密頁籤、帶入第一個路徑。
+      // 從 Shell Extension 右鍵選單過來的路徑清單，切到加密頁籤、整份清單都帶進去。
       activeTab.value = 'encrypt'
       if (data.paths && data.paths.length > 0) {
-        encryptPath.value = data.paths[0]
-        encryptResultIsError.value = false
-        encryptResultMessage.value = data.paths.length > 1
-          ? `從右鍵選單選了 ${data.paths.length} 個項目，目前先帶入第一個，一次加密多個項目的功能之後會補上。`
-          : ''
+        encryptPaths.value = [...data.paths]
       }
     }
   })
@@ -217,6 +238,70 @@ function refreshList() {
   window.chrome.webview.postMessage({ type: 'listVault' })
 }
 
+// 把清單裡帶有相同 batchId 的項目摺疊成一組，沒有 batchId 的維持獨立顯示。
+// 分組本身完全在前端做——後端只負責在每個項目上帶 batchId，分不分組、怎麼呈現都是畫面的事。
+const groupedVaultItems = computed(() => {
+  const groups = new Map()
+  const standalone = []
+
+  for (const item of vaultItems.value) {
+    if (item.batchId) {
+      if (!groups.has(item.batchId)) {
+        groups.set(item.batchId, [])
+      }
+      groups.get(item.batchId).push(item)
+    } else {
+      standalone.push(item)
+    }
+  }
+
+  const result = []
+  for (const item of standalone) {
+    result.push({ isGroup: false, item })
+  }
+  for (const [batchId, items] of groups) {
+    result.push({ isGroup: true, batchId, items })
+  }
+
+  result.sort((a, b) => {
+    const latest = (entry) => entry.isGroup
+      ? Math.max(...entry.items.map((i) => new Date(i.createdAtUtc).getTime()))
+      : new Date(entry.item.createdAtUtc).getTime()
+    return latest(b) - latest(a)
+  })
+
+  return result
+})
+
+function batchPreviewText(items) {
+  const names = items.map((i) => i.originalName)
+  if (names.length <= 2) {
+    return names.join('、')
+  }
+  return `${names.slice(0, 2).join('、')}...等${names.length}個文件`
+}
+
+function toggleGroupExpanded(batchId) {
+  if (expandedGroups.value.has(batchId)) {
+    expandedGroups.value.delete(batchId)
+  } else {
+    expandedGroups.value.add(batchId)
+  }
+}
+
+function decryptGroupViaPassword(group) {
+  const password = prompt(`輸入密碼，解鎖這批 ${group.items.length} 個項目（${batchPreviewText(group.items)}）：`)
+  if (password === null || password === '') {
+    return
+  }
+  decryptingBatchIds.value.add(group.batchId)
+  window.chrome.webview.postMessage({
+    type: 'decryptBatch',
+    uuids: group.items.map((i) => i.uuid),
+    password
+  })
+}
+
 function refreshHistory() {
   isLoadingHistory.value = true
   window.chrome.webview.postMessage({ type: 'listHistory' })
@@ -228,6 +313,10 @@ function pickFile() {
 
 function pickFolder() {
   window.chrome.webview.postMessage({ type: 'pickFolder' })
+}
+
+function removeEncryptPath(index) {
+  encryptPaths.value.splice(index, 1)
 }
 
 function pickVaultFolder() {
@@ -269,20 +358,21 @@ function decryptTabViaRecoveryKey() {
 }
 
 function submitEncrypt() {
-  if (!encryptPath.value || !encryptPassword.value) {
-    encryptResultIsError.value = true
-    encryptResultMessage.value = '請至少填寫路徑跟密碼。'
+  if (encryptPaths.value.length === 0 || !encryptPassword.value) {
+    encryptItemResults.value = [{ path: '', success: false, errorMessage: '請至少選一個項目、並填寫密碼。', note: '' }]
     return
   }
   isEncrypting.value = true
-  encryptResultMessage.value = ''
+  encryptItemResults.value = []
+  // 多個項目時，Passkey／恢復金鑰在畫面上已經鎖住不能勾，這裡再保險一次，不管前端狀態怎樣都不送出去。
+  const isBatch = encryptPaths.value.length > 1
   window.chrome.webview.postMessage({
     type: 'encrypt',
-    path: encryptPath.value,
+    paths: encryptPaths.value,
     password: encryptPassword.value,
     hint: hint.value,
-    enablePasskey: enablePasskey.value,
-    enableRecoveryKey: enableRecoveryKey.value
+    enablePasskey: isBatch ? false : enablePasskey.value,
+    enableRecoveryKey: isBatch ? false : enableRecoveryKey.value
   })
 }
 
@@ -422,7 +512,9 @@ function closeRecoveryKeyDisplay() {
 }
 
 function requestDelete(item) {
-  if (!confirm(`確定要刪除「${item.originalName}」這筆加密紀錄嗎？這個動作沒辦法復原。`)) {
+  if (!confirm(
+    `這會永久刪除「${item.originalName}」已加密的內容——刪除後，就算 .locked 指標檔還在，也再也沒辦法用密碼、Passkey 或恢復金鑰解開，資料等於徹底消失，不是「從清單移除」而已。\n\n確定要繼續嗎？`
+  )) {
     return
   }
   window.chrome.webview.postMessage({ type: 'deleteRecord', uuid: item.uuid })
@@ -494,12 +586,18 @@ function historyDetailText(entry) {
     <div v-if="activeTab === 'encrypt'">
       <h1>加密檔案／資料夾</h1>
       <div style="margin-bottom: 1rem;">
-        <label>檔案或資料夾路徑</label><br />
-        <input v-model="encryptPath" placeholder="例如 D:\測試檔案.txt" style="width: 100%; padding: 0.5rem; box-sizing: border-box;" />
+        <label>要加密的項目（可以選多個）</label><br />
         <div style="margin-top: 0.5rem;">
-          <button @click="pickFile" type="button">選擇檔案</button>
+          <button @click="pickFile" type="button">選擇檔案（可多選）</button>
           <button @click="pickFolder" type="button" style="margin-left: 0.5rem;">選擇資料夾</button>
         </div>
+        <ul v-if="encryptPaths.length > 0" style="margin-top: 0.5rem; padding-left: 1.2rem;">
+          <li v-for="(path, index) in encryptPaths" :key="path" style="margin-bottom: 0.25rem;">
+            {{ path }}
+            <button @click="removeEncryptPath(index)" type="button" style="margin-left: 0.5rem;">移除</button>
+          </li>
+        </ul>
+        <p v-else style="color: #999;">還沒選任何項目。</p>
       </div>
       <div style="margin-bottom: 1rem;">
         <label>密碼</label><br />
@@ -511,22 +609,33 @@ function historyDetailText(entry) {
       </div>
       <div style="margin-bottom: 1rem;">
         <label>
-          <input type="checkbox" v-model="enablePasskey" />
+          <input type="checkbox" v-model="enablePasskey" :disabled="encryptPaths.length > 1" />
           開啟以 Passkey 快速解鎖（用這台裝置的 Windows Hello 額外解鎖，密碼仍然可以照舊使用）
         </label>
+        <p v-if="encryptPaths.length > 1" style="color: #999; font-size: 0.85em; margin: 0.25rem 0 0 1.5rem;">
+          一次選了多個項目時不能用，每個項目都要重新驗證一次會太打擾人。
+        </p>
       </div>
       <div style="margin-bottom: 1rem;">
         <label>
-          <input type="checkbox" v-model="enableRecoveryKey" />
+          <input type="checkbox" v-model="enableRecoveryKey" :disabled="encryptPaths.length > 1" />
           開啟恢復金鑰備援（產生一組一次性顯示的恢復碼，密碼忘記時可以用它解鎖，需要自己妥善保管）
         </label>
+        <p v-if="encryptPaths.length > 1" style="color: #999; font-size: 0.85em; margin: 0.25rem 0 0 1.5rem;">
+          一次選了多個項目時不能用，每個項目會各自產生不同的碼，顯示跟保存會太複雜。
+        </p>
       </div>
       <button @click="submitEncrypt" :disabled="isEncrypting">
-        {{ isEncrypting ? '加密中...' : '加密' }}
+        {{ isEncrypting ? `加密中... (${encryptItemResults.length}/${encryptBatchTotal})` : '加密' }}
       </button>
-      <p v-if="encryptResultMessage" :style="{ color: encryptResultIsError ? 'red' : 'green' }">
-        {{ encryptResultMessage }}
-      </p>
+
+      <div v-if="encryptItemResults.length > 0" style="margin-top: 1rem;">
+        <div v-for="(item, index) in encryptItemResults" :key="index" :style="{ color: item.success ? 'green' : 'red', marginBottom: '0.25rem' }">
+          <template v-if="item.path">{{ item.success ? '✅' : '❌' }} {{ item.path }}</template>
+          <span v-if="item.errorMessage"> — {{ item.errorMessage }}</span>
+          <span v-if="item.note"> — {{ item.note }}</span>
+        </div>
+      </div>
     </div>
 
     <div v-else-if="activeTab === 'decrypt'">
@@ -587,42 +696,103 @@ function historyDetailText(entry) {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="item in vaultItems" :key="item.uuid" style="border-bottom: 1px solid #eee;">
-              <td style="padding: 0.5rem;">
-                {{ item.originalName }}
-                <span v-if="item.hasNestedLocks" title="裡面還有其他鎖定項目" style="color: orange;"> 🔒×{{ item.nestedLockCount }}</span>
-                <br v-if="!item.markerFound" />
-                <span v-if="!item.markerFound" style="color: #c00; font-size: 0.85em;">⚠️ 已移動或找不到（{{ item.markerStatusMessage }}）</span>
-              </td>
-              <td style="padding: 0.5rem;">{{ typeLabel(item.type) }}</td>
-              <td style="padding: 0.5rem;">{{ formatSize(item.originalSizeBytes) }}</td>
-              <td style="padding: 0.5rem;">{{ item.hint || '（無）' }}</td>
-              <td style="padding: 0.5rem;">{{ formatDate(item.createdAtUtc) }}</td>
-              <td style="padding: 0.5rem; white-space: nowrap;">
-                <button @click="decryptFromList(item)" type="button" :disabled="decryptingUuids.has(item.uuid)">
-                  {{ decryptingUuids.has(item.uuid) ? '解密中...' : '解密' }}
-                </button>
-                <button
-                  v-if="item.passkeyEnabled"
-                  @click="decryptFromListViaPasskey(item)"
-                  type="button"
-                  :disabled="decryptingUuids.has(item.uuid)"
-                  style="margin-left: 0.5rem;"
-                >
-                  🔑 Passkey 解鎖
-                </button>
-                <button
-                  v-if="item.recoveryKeyEnabled"
-                  @click="decryptFromListViaRecoveryKey(item)"
-                  type="button"
-                  :disabled="decryptingUuids.has(item.uuid)"
-                  style="margin-left: 0.5rem;"
-                >
-                  🔐 恢復金鑰解鎖
-                </button>
-                <button @click="requestDelete(item)" type="button" style="margin-left: 0.5rem;">刪除紀錄</button>
-              </td>
-            </tr>
+            <template v-for="group in groupedVaultItems" :key="group.isGroup ? group.batchId : group.item.uuid">
+              <!-- 獨立項目（沒有 batchId）：跟之前一樣直接顯示一列。 -->
+              <tr v-if="!group.isGroup" style="border-bottom: 1px solid #eee;">
+                <td style="padding: 0.5rem;">
+                  {{ group.item.originalName }}
+                  <span v-if="group.item.hasNestedLocks" title="裡面還有其他鎖定項目" style="color: orange;"> 🔒×{{ group.item.nestedLockCount }}</span>
+                  <br v-if="!group.item.markerFound" />
+                  <span v-if="!group.item.markerFound" style="color: #c00; font-size: 0.85em;">⚠️ 已移動或找不到（{{ group.item.markerStatusMessage }}）</span>
+                </td>
+                <td style="padding: 0.5rem;">{{ typeLabel(group.item.type) }}</td>
+                <td style="padding: 0.5rem;">{{ formatSize(group.item.originalSizeBytes) }}</td>
+                <td style="padding: 0.5rem;">{{ group.item.hint || '（無）' }}</td>
+                <td style="padding: 0.5rem;">{{ formatDate(group.item.createdAtUtc) }}</td>
+                <td style="padding: 0.5rem; white-space: nowrap;">
+                  <button @click="decryptFromList(group.item)" type="button" :disabled="decryptingUuids.has(group.item.uuid)">
+                    {{ decryptingUuids.has(group.item.uuid) ? '解密中...' : '解密' }}
+                  </button>
+                  <button
+                    v-if="group.item.passkeyEnabled"
+                    @click="decryptFromListViaPasskey(group.item)"
+                    type="button"
+                    :disabled="decryptingUuids.has(group.item.uuid)"
+                    style="margin-left: 0.5rem;"
+                  >
+                    🔑 Passkey 解鎖
+                  </button>
+                  <button
+                    v-if="group.item.recoveryKeyEnabled"
+                    @click="decryptFromListViaRecoveryKey(group.item)"
+                    type="button"
+                    :disabled="decryptingUuids.has(group.item.uuid)"
+                    style="margin-left: 0.5rem;"
+                  >
+                    🔐 恢復金鑰解鎖
+                  </button>
+                  <button @click="requestDelete(group.item)" type="button" style="margin-left: 0.5rem;">永久刪除</button>
+                </td>
+              </tr>
+
+              <!-- 批次群組：一次選多個項目加密出來的，摺疊成一列，展開後每個項目維持獨立操作能力。 -->
+              <template v-else>
+                <tr style="border-bottom: 1px solid #eee; background: #f7f7f7;">
+                  <td colspan="6" style="padding: 0.5rem;">
+                    <button @click="toggleGroupExpanded(group.batchId)" type="button" style="margin-right: 0.5rem;">
+                      {{ expandedGroups.has(group.batchId) ? '▼' : '▶' }}
+                    </button>
+                    {{ batchPreviewText(group.items) }}
+                    <button
+                      @click="decryptGroupViaPassword(group)"
+                      type="button"
+                      style="margin-left: 0.5rem;"
+                      :disabled="decryptingBatchIds.has(group.batchId)"
+                    >
+                      {{ decryptingBatchIds.has(group.batchId) ? '解鎖中...' : '全部解鎖' }}
+                    </button>
+                  </td>
+                </tr>
+                <template v-if="expandedGroups.has(group.batchId)">
+                  <tr v-for="item in group.items" :key="item.uuid" style="border-bottom: 1px solid #eee;">
+                    <td style="padding: 0.5rem 0.5rem 0.5rem 2rem;">
+                      {{ item.originalName }}
+                      <span v-if="item.hasNestedLocks" title="裡面還有其他鎖定項目" style="color: orange;"> 🔒×{{ item.nestedLockCount }}</span>
+                      <br v-if="!item.markerFound" />
+                      <span v-if="!item.markerFound" style="color: #c00; font-size: 0.85em;">⚠️ 已移動或找不到（{{ item.markerStatusMessage }}）</span>
+                    </td>
+                    <td style="padding: 0.5rem;">{{ typeLabel(item.type) }}</td>
+                    <td style="padding: 0.5rem;">{{ formatSize(item.originalSizeBytes) }}</td>
+                    <td style="padding: 0.5rem;">{{ item.hint || '（無）' }}</td>
+                    <td style="padding: 0.5rem;">{{ formatDate(item.createdAtUtc) }}</td>
+                    <td style="padding: 0.5rem; white-space: nowrap;">
+                      <button @click="decryptFromList(item)" type="button" :disabled="decryptingUuids.has(item.uuid)">
+                        {{ decryptingUuids.has(item.uuid) ? '解密中...' : '解密' }}
+                      </button>
+                      <button
+                        v-if="item.passkeyEnabled"
+                        @click="decryptFromListViaPasskey(item)"
+                        type="button"
+                        :disabled="decryptingUuids.has(item.uuid)"
+                        style="margin-left: 0.5rem;"
+                      >
+                        🔑 Passkey 解鎖
+                      </button>
+                      <button
+                        v-if="item.recoveryKeyEnabled"
+                        @click="decryptFromListViaRecoveryKey(item)"
+                        type="button"
+                        :disabled="decryptingUuids.has(item.uuid)"
+                        style="margin-left: 0.5rem;"
+                      >
+                        🔐 恢復金鑰解鎖
+                      </button>
+                      <button @click="requestDelete(item)" type="button" style="margin-left: 0.5rem;">永久刪除</button>
+                    </td>
+                  </tr>
+                </template>
+              </template>
+            </template>
           </tbody>
         </table>
       </div>

@@ -85,6 +85,10 @@ public partial class MainWindow : Window
                     await HandleDecryptByRecoveryKeyRequestAsync(root);
                     break;
 
+                case "decryptBatch":
+                    await HandleDecryptBatchRequestAsync(root);
+                    break;
+
                 case "saveRecoveryKeyToFile":
                     HandleSaveRecoveryKeyToFileRequest(root);
                     break;
@@ -142,7 +146,11 @@ public partial class MainWindow : Window
 
     private async Task HandleEncryptRequestAsync(JsonElement request)
     {
-        var path = request.GetProperty("path").GetString() ?? "";
+        var paths = request.GetProperty("paths").EnumerateArray()
+            .Select(p => p.GetString() ?? "")
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .ToList();
+
         var password = request.GetProperty("password").GetString() ?? "";
         var hint = request.TryGetProperty("hint", out var hintProp) ? hintProp.GetString() : null;
         var enablePasskey = request.TryGetProperty("enablePasskey", out var passkeyProp) && passkeyProp.GetBoolean();
@@ -150,29 +158,42 @@ public partial class MainWindow : Window
 
         var ownerWindowHandle = enablePasskey ? new WindowInteropHelper(this).Handle : IntPtr.Zero;
 
-        var result = await _lockService.EncryptAsync(
-            path, password, string.IsNullOrWhiteSpace(hint) ? null : hint,
-            enablePasskey, ownerWindowHandle, enableRecoveryKey);
+        // 選了不只一個項目才需要分組——單一項目沒有「摺疊」的意義，維持 batchId = null。
+        var batchId = paths.Count > 1 ? Guid.NewGuid().ToString() : null;
 
-        // 使用者勾了「開啟 Passkey」不代表一定成功啟用（裝置不支援、驗證中途取消都會導致沒真的開成功），
-        // 回頭查一次實際的 metadata，讓前端能準確告知使用者「有沒有真的多了這層保護」，不能只看使用者當初的意圖。
-        var actuallyPasskeyEnabled = false;
-        if (result.Success)
+        SendToFrontend(new { type = "encryptBatchStarted", totalCount = paths.Count });
+
+        var successCount = 0;
+
+        foreach (var path in paths)
         {
-            actuallyPasskeyEnabled = _vaultManager.LoadMetadata(result.Uuid)?.PasskeyEnabled ?? false;
+            var result = await _lockService.EncryptAsync(
+                path, password, string.IsNullOrWhiteSpace(hint) ? null : hint,
+                enablePasskey, ownerWindowHandle, enableRecoveryKey, batchId);
+
+            var actuallyPasskeyEnabled = false;
+            if (result.Success)
+            {
+                successCount++;
+                actuallyPasskeyEnabled = _vaultManager.LoadMetadata(result.Uuid)?.PasskeyEnabled ?? false;
+            }
+
+            // 每完成一個項目就馬上回報，前端可以即時更新清單，不用等全部跑完才看到結果。
+            SendToFrontend(new
+            {
+                type = "encryptItemResult",
+                path,
+                success = result.Success,
+                uuid = result.Uuid,
+                lockedMarkerPath = result.LockedMarkerPath,
+                errorMessage = result.ErrorMessage,
+                passkeyRequested = enablePasskey,
+                passkeyEnabled = actuallyPasskeyEnabled,
+                recoveryKey = result.RecoveryKey
+            });
         }
 
-        SendToFrontend(new
-        {
-            type = "encryptResult",
-            success = result.Success,
-            uuid = result.Uuid,
-            lockedMarkerPath = result.LockedMarkerPath,
-            errorMessage = result.ErrorMessage,
-            passkeyRequested = enablePasskey,
-            passkeyEnabled = actuallyPasskeyEnabled,
-            recoveryKey = result.RecoveryKey
-        });
+        SendToFrontend(new { type = "encryptBatchDone", totalCount = paths.Count, successCount });
     }
 
     private async Task HandleDecryptRequestAsync(JsonElement request)
@@ -250,6 +271,44 @@ public partial class MainWindow : Window
             restoredPath = result.RestoredPath,
             errorMessage = result.ErrorMessage
         });
+    }
+
+    /// <summary>
+    /// 對應「已加密清單」頁摺疊群組的「全部解鎖」按鈕：跟批次加密一樣只支援密碼，
+    /// 逐一解密、每完成一個就馬上回報，不用等全部跑完才看到結果。還原位置固定用各自的原始位置，
+    /// 不像單獨解鎖那樣可以問「原始位置還是自訂位置」——批次情境下每個項目分別問一次太打擾人。
+    /// </summary>
+    private async Task HandleDecryptBatchRequestAsync(JsonElement request)
+    {
+        var uuids = request.GetProperty("uuids").EnumerateArray()
+            .Select(u => u.GetString() ?? "")
+            .Where(u => !string.IsNullOrWhiteSpace(u))
+            .ToList();
+        var password = request.GetProperty("password").GetString() ?? "";
+
+        SendToFrontend(new { type = "decryptBatchStarted", totalCount = uuids.Count });
+
+        var successCount = 0;
+
+        foreach (var uuid in uuids)
+        {
+            var result = await _lockService.DecryptByUuidAsync(uuid, password);
+            if (result.Success)
+            {
+                successCount++;
+            }
+
+            SendToFrontend(new
+            {
+                type = "decryptBatchItemResult",
+                uuid,
+                success = result.Success,
+                restoredPath = result.RestoredPath,
+                errorMessage = result.ErrorMessage
+            });
+        }
+
+        SendToFrontend(new { type = "decryptBatchDone", totalCount = uuids.Count, successCount });
     }
 
     /// <summary>
@@ -478,6 +537,7 @@ public partial class MainWindow : Window
                         type = m.Type.ToString(),
                         passkeyEnabled = m.PasskeyEnabled,
                         recoveryKeyEnabled = m.RecoveryKeyEnabled,
+                        batchId = m.BatchId,
                         originalSizeBytes = m.OriginalSizeBytes,
                         hint = m.Hint,
                         createdAtUtc = m.CreatedAtUtc,
@@ -537,12 +597,13 @@ public partial class MainWindow : Window
     private void HandlePickFile(JsonElement request)
     {
         var purpose = request.TryGetProperty("purpose", out var purposeProp) ? purposeProp.GetString() : null;
+        var allowMultiselect = purpose == "encryptPath";
 
         var dialog = new Microsoft.Win32.OpenFileDialog
         {
             Title = purpose == "decryptPath" ? "選擇要解密的 .locked 檔案" : "選擇要加密的檔案",
             CheckFileExists = true,
-            Multiselect = false,
+            Multiselect = allowMultiselect,
             Filter = purpose == "decryptPath"
                 ? "FileLocker 鎖定檔 (*.locked)|*.locked|所有檔案 (*.*)|*.*"
                 : "所有檔案 (*.*)|*.*"
@@ -550,7 +611,14 @@ public partial class MainWindow : Window
 
         if (dialog.ShowDialog(this) == true)
         {
-            SendToFrontend(new { type = "pathPicked", purpose, path = dialog.FileName });
+            if (allowMultiselect)
+            {
+                SendToFrontend(new { type = "pathsPicked", purpose, paths = dialog.FileNames });
+            }
+            else
+            {
+                SendToFrontend(new { type = "pathPicked", purpose, path = dialog.FileName });
+            }
         }
         else
         {

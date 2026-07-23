@@ -39,7 +39,7 @@ public class LockService
     public async Task<LockResult> EncryptAsync(
         string path, string password, string? hint,
         bool enablePasskey = false, IntPtr ownerWindowHandle = default,
-        bool enableRecoveryKey = false,
+        bool enableRecoveryKey = false, string? batchId = null,
         IProgress<double>? progress = null)
     {
         var isFolder = Directory.Exists(path);
@@ -173,7 +173,8 @@ public class LockService
                 PasskeyChallenge = passkeyChallengeBase64,
                 PasskeyWrappedContentKey = passkeyWrappedKeyBase64,
                 RecoveryKeyEnabled = recoveryKeyWrappedBase64 is not null,
-                RecoveryKeyWrappedContentKey = recoveryKeyWrappedBase64
+                RecoveryKeyWrappedContentKey = recoveryKeyWrappedBase64,
+                BatchId = batchId
             };
             _vault.SaveMetadata(metadata);
 
@@ -768,6 +769,12 @@ public class LockService
             }
 
             _vault.DeleteItem(uuid);
+
+            // Vault 裡的加密內容刪掉之後，原本位置的 .locked 指標檔會變成一個指向不存在內容的死連結——
+            // 順便清掉它，避免使用者之後雙擊到一個只會顯示「找不到對應的加密紀錄」的失效檔案。
+            // 沿用跟解密成功後一樣的簽章驗證邏輯，確保不會誤刪到別的項目的指標檔。
+            CleanupMarkerIfMatches(metadata, uuid);
+
             _history?.Append(new HistoryEntry(uuid, metadata.OriginalName, HistoryAction.RecordDeleted, DateTimeOffset.UtcNow, null));
 
             return new DeleteRecordResult(true, false);
