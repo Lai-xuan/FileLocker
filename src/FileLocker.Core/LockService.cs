@@ -70,6 +70,12 @@ public class LockService
         {
             return new LockResult(false, "", "", $"加密過程發生錯誤：{ex.Message}");
         }
+        catch (Exception ex)
+        {
+            // EncryptToVault 內部已經自己接住所有例外，理論上這裡不會再丟出來——
+            // 保留這層純粹是防禦性寫法，避免未來改動時漏接某個例外型別導致整個 App 崩潰。
+            return new LockResult(false, "", "", $"加密過程發生未預期的錯誤：{ex.Message}");
+        }
 
         try
         {
@@ -204,6 +210,19 @@ public class LockService
 
             return new LockResult(true, encryptResult.Uuid!, markerPath, cleanupWarning, recoveryKeyDisplayText);
         }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // metadata／marker 這一段如果寫到一半失敗（例如 marker.WriteTo 因為磁碟滿了而丟出例外），
+            // 之前可能已經成功把 metadata 寫進 Vault 了——盡力把這個孤兒項目清掉，避免清單頁出現一筆
+            // 沒有對應 .locked 指標檔、永遠打不開的幽靈紀錄。
+            TryCleanupOrphanedVaultEntry(encryptResult.Uuid);
+            return new LockResult(false, "", "", $"加密過程發生錯誤：{ex.Message}");
+        }
+        catch (Exception ex)
+        {
+            TryCleanupOrphanedVaultEntry(encryptResult.Uuid);
+            return new LockResult(false, "", "", $"加密過程發生未預期的錯誤：{ex.Message}");
+        }
         finally
         {
             if (encryptResult.EncryptionKey is not null)
@@ -214,6 +233,22 @@ public class LockService
             {
                 SecureFileEraser.OverwriteAndDelete(encryptResult.TempZipPath);
             }
+        }
+    }
+
+    private void TryCleanupOrphanedVaultEntry(string? uuid)
+    {
+        if (string.IsNullOrEmpty(uuid))
+        {
+            return;
+        }
+        try
+        {
+            _vault.DeleteItem(uuid);
+        }
+        catch (Exception)
+        {
+            // 盡力而為，清不掉就算了，不能讓清理失敗又拋出新的例外蓋掉原本要回報的錯誤。
         }
     }
 
@@ -283,6 +318,13 @@ public class LockService
         {
             return new EncryptionResult(
                 false, $"加密過程發生錯誤：{ex.Message}", null, null, null, null, 0, null, tempZipToCleanup);
+        }
+        catch (Exception ex)
+        {
+            // 兜底：任何沒特別預期到的例外（例如底層密碼學函式庫丟出的例外）都不應該讓整個 App 崩潰，
+            // 一律轉換成失敗結果回傳，讓 GUI 能顯示錯誤訊息而不是整個程式當掉。
+            return new EncryptionResult(
+                false, $"加密過程發生未預期的錯誤：{ex.Message}", null, null, null, null, 0, null, tempZipToCleanup);
         }
     }
 
@@ -514,8 +556,13 @@ public class LockService
     }
 
     /// <summary>
-    /// DecryptByUuidCore／DecryptByPasskeyAsync 共用：解密成功後，反推原本 .locked 應該在的位置，
-    /// 有（而且真的是同一個 UUID）就清掉，避免留下一個已經失效、會誤導使用者的指標檔；沒有就跳過。
+    /// DecryptByUuidCore／DecryptByPasskeyAsync／DecryptByRecoveryKeyAsync 共用：解密成功後，
+    /// 反推原本 .locked 應該在的位置，有（而且真的是同一個 UUID、簽章也驗證通過）就清掉，
+    /// 避免留下一個已經失效、會誤導使用者的指標檔；沒有就跳過。
+    /// 這裡刻意額外驗證簽章、不能只看 UUID 是否相符——metadata.OriginalPath 是明文的本機資料，
+    /// 沒有簽章保護，理論上可能被竄改；如果只看 UUID，攻擊者只要能在算出來的位置預先放一個
+    /// UUID 對得上的假檔案，就有機會誘使這裡刪掉非預期的檔案。加上簽章驗證後，
+    /// 攻擊者還得知道 Vault 的簽章金鑰才偽造得出通過驗證的假指標檔，門檻高很多。
     /// </summary>
     private void CleanupMarkerIfMatches(LockedItemMetadata metadata, string uuid)
     {
@@ -526,11 +573,19 @@ public class LockService
         }
 
         var marker = LockedMarkerFile.ReadFrom(expectedMarkerPath);
-        if (marker is not null && marker.Uuid == uuid)
+        if (marker is null || marker.Uuid != uuid)
         {
-            File.Delete(expectedMarkerPath);
+            return;
         }
-        // 若那個位置的 .locked 屬於別的項目（例如同位置後來又加密了別的東西），不動它。
+
+        var vaultConfig = _vault.LoadOrCreateConfig();
+        var signingKey = Convert.FromBase64String(vaultConfig.SigningKeyBase64);
+        if (!marker.VerifySignature(signingKey))
+        {
+            return;
+        }
+
+        File.Delete(expectedMarkerPath);
     }
 
     /// <summary>密碼路徑：驗證密碼、拿到內容金鑰後，交給 RestoreFromKey 做剩下的還原工作。</summary>
@@ -670,6 +725,10 @@ public class LockService
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return new UnlockResult(false, "", $"解密過程發生錯誤：{ex.Message}");
+        }
+        catch (Exception ex)
+        {
+            return new UnlockResult(false, "", $"解密過程發生未預期的錯誤：{ex.Message}");
         }
     }
 

@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using FileLocker.Core.History;
 using FileLocker.Core.Models;
 using FileLocker.Core.Vault;
@@ -435,5 +436,35 @@ public class LockServiceTests : IDisposable
 
         Assert.False(unlockResult.Success);
         Assert.False(File.Exists(maliciousAbsolutePath));
+    }
+
+    [Fact]
+    public async Task DecryptByRecoveryKeyAsync_WhenMarkerAtOriginalLocationHasForgedSignature_DoesNotDeleteIt()
+    {
+        // 對應修掉的 bug：CleanupMarkerIfMatches 現在除了比對 UUID，還要驗證簽章才會刪除，
+        // 偽造一個 UUID 對得上、但簽章是亂數（不是用 Vault 簽章金鑰簽出來的）的假指標檔應該不會被清掉。
+        var filePath = Path.Combine(_workDir.FullName, "測試簽章防護.txt");
+        File.WriteAllText(filePath, "內容");
+        var lockResult = await _service.EncryptAsync(filePath, "password", null, enableRecoveryKey: true);
+
+        var forgedMarker = new LockedMarkerFile
+        {
+            Uuid = lockResult.Uuid,
+            SignatureBase64 = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))
+        };
+        forgedMarker.WriteTo(lockResult.LockedMarkerPath);
+
+        var customDestDir = Directory.CreateTempSubdirectory("FileLockerForgedMarkerTest_");
+        try
+        {
+            var unlockResult = await _service.DecryptByRecoveryKeyAsync(lockResult.Uuid, lockResult.RecoveryKey!, customDestDir.FullName);
+
+            Assert.True(unlockResult.Success);
+            Assert.True(File.Exists(lockResult.LockedMarkerPath)); // 假指標檔簽章驗證不過，不應該被清掉
+        }
+        finally
+        {
+            customDestDir.Delete(recursive: true);
+        }
     }
 }
