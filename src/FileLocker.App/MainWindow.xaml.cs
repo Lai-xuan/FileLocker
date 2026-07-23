@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Interop;
 using FileLocker.Core;
 using FileLocker.Core.History;
+using FileLocker.Core.Settings;
 using FileLocker.Core.Vault;
 
 namespace FileLocker.App;
@@ -13,18 +14,26 @@ public partial class MainWindow : Window
     private readonly VaultManager _vaultManager;
     private readonly HistoryLogger _historyLogger;
     private readonly LockService _lockService;
+    private readonly AppSettingsManager _settingsManager;
+    private readonly AppSettings _settings;
+    private readonly string _appDataDir;
 
     /// <summary>
     /// VaultManager／LockService 現在由 App.xaml.cs 統一建立、傳進來——這樣主視窗跟密碼小視窗
     /// 用的是同一份 Vault／History 設定，不會各自重複建立、路徑卻可能不小心兜不起來。
     /// </summary>
-    public MainWindow(VaultManager vaultManager, HistoryLogger historyLogger, LockService lockService)
+    public MainWindow(
+        VaultManager vaultManager, HistoryLogger historyLogger, LockService lockService,
+        AppSettingsManager settingsManager, AppSettings settings, string appDataDir)
     {
         InitializeComponent();
 
         _vaultManager = vaultManager;
         _historyLogger = historyLogger;
         _lockService = lockService;
+        _settingsManager = settingsManager;
+        _settings = settings;
+        _appDataDir = appDataDir;
 
         Loaded += async (_, _) =>
         {
@@ -70,6 +79,22 @@ public partial class MainWindow : Window
 
                 case "inspectLockedFile":
                     HandleInspectLockedFileRequest(root);
+                    break;
+
+                case "getSettings":
+                    HandleGetSettingsRequest();
+                    break;
+
+                case "pickVaultFolder":
+                    HandlePickVaultFolder();
+                    break;
+
+                case "changeVaultPath":
+                    await HandleChangeVaultPathRequestAsync(root);
+                    break;
+
+                case "updateSetting":
+                    HandleUpdateSettingRequest(root);
                     break;
 
                 case "pickFile":
@@ -304,6 +329,119 @@ public partial class MainWindow : Window
             passkeyEnabled = metadata?.PasskeyEnabled ?? false,
             recoveryKeyEnabled = metadata?.RecoveryKeyEnabled ?? false
         });
+    }
+
+    private void HandleGetSettingsRequest()
+    {
+        SendToFrontend(new
+        {
+            type = "settingsResult",
+            vaultPath = _settings.VaultPath,
+            language = _settings.Language,
+            theme = _settings.Theme
+        });
+    }
+
+    private void HandlePickVaultFolder()
+    {
+        var dialog = new Microsoft.Win32.OpenFolderDialog
+        {
+            Title = "選擇要搬移到的新 Vault 位置（建議選一個空資料夾）"
+        };
+
+        if (dialog.ShowDialog(this) == true)
+        {
+            SendToFrontend(new { type = "pathPicked", purpose = "vaultFolder", path = dialog.FolderName });
+        }
+        else
+        {
+            SendToFrontend(new { type = "pathPickCancelled", purpose = "vaultFolder" });
+        }
+    }
+
+    /// <summary>
+    /// 搬移 Vault：把目前 Vault 資料夾底下所有檔案搬到新位置、更新設定檔。
+    /// 刻意不嘗試在同一個執行中的 App 裡「熱替換」正在使用的 VaultManager（怕跟正在進行中的
+    /// 加密/解密操作互相干擾），搬完之後請使用者自己重新啟動 App 讓變更生效，比較單純可靠。
+    /// </summary>
+    private async Task HandleChangeVaultPathRequestAsync(JsonElement request)
+    {
+        var newPath = request.GetProperty("newPath").GetString() ?? "";
+        var currentPath = _settings.VaultPath!;
+
+        if (string.Equals(Path.GetFullPath(newPath), Path.GetFullPath(currentPath), StringComparison.OrdinalIgnoreCase))
+        {
+            SendToFrontend(new { type = "changeVaultPathResult", success = false, errorMessage = "新位置跟目前位置相同，不需要搬移。" });
+            return;
+        }
+
+        if (Directory.Exists(newPath) && Directory.EnumerateFileSystemEntries(newPath).Any())
+        {
+            SendToFrontend(new { type = "changeVaultPathResult", success = false, errorMessage = "新位置的資料夾不是空的，請選一個空資料夾，避免跟裡面既有的檔案混在一起。" });
+            return;
+        }
+
+        try
+        {
+            await Task.Run(() => MoveVaultContents(currentPath, newPath));
+
+            _settings.VaultPath = newPath;
+            _settingsManager.Save(_settings);
+
+            SendToFrontend(new { type = "changeVaultPathResult", success = true, newPath, requiresRestart = true });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            SendToFrontend(new { type = "changeVaultPathResult", success = false, errorMessage = $"搬移失敗：{ex.Message}" });
+        }
+    }
+
+    /// <summary>優先用 Directory.Move（同一個磁碟區內幾乎瞬間完成）；跨磁碟區的話 Directory.Move 會失敗，退而求其次逐一複製再刪除來源。</summary>
+    private static void MoveVaultContents(string sourcePath, string destinationPath)
+    {
+        if (Directory.Exists(destinationPath) && !Directory.EnumerateFileSystemEntries(destinationPath).Any())
+        {
+            Directory.Delete(destinationPath);
+        }
+
+        try
+        {
+            Directory.Move(sourcePath, destinationPath);
+            return;
+        }
+        catch (IOException)
+        {
+            // 通常是跨磁碟區導致 Directory.Move 不支援，改用複製再刪除。
+        }
+
+        Directory.CreateDirectory(destinationPath);
+        foreach (var filePath in Directory.EnumerateFiles(sourcePath))
+        {
+            var targetPath = Path.Combine(destinationPath, Path.GetFileName(filePath));
+            File.Copy(filePath, targetPath, overwrite: false);
+        }
+        Directory.Delete(sourcePath, recursive: true);
+    }
+
+    private void HandleUpdateSettingRequest(JsonElement request)
+    {
+        var key = request.GetProperty("key").GetString() ?? "";
+        var value = request.GetProperty("value").GetString() ?? "";
+
+        switch (key)
+        {
+            case "language":
+                _settings.Language = value;
+                break;
+            case "theme":
+                _settings.Theme = value;
+                break;
+            default:
+                return;
+        }
+
+        _settingsManager.Save(_settings);
+        SendToFrontend(new { type = "updateSettingResult", success = true, key, value });
     }
 
     private async Task HandleListVaultRequestAsync()

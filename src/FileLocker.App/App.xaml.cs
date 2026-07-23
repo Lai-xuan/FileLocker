@@ -2,6 +2,8 @@
 using System.Windows;
 using FileLocker.Core;
 using FileLocker.Core.History;
+using FileLocker.Core.Security;
+using FileLocker.Core.Settings;
 using FileLocker.Core.Vault;
 
 namespace FileLocker.App;
@@ -12,19 +14,30 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        // appDataDir 是固定的（不可搬）：App 本身的設定、使用紀錄、鎖定狀態都放這裡，
+        // 跟 Vault 內容（可以搬到別的位置）分開處理，見規格文件第 6 節。
         var appDataDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "FileLocker");
-        var vaultPath = Path.Combine(appDataDir, "Vault");
-        Directory.CreateDirectory(vaultPath);
+        Directory.CreateDirectory(appDataDir);
 
-        var vaultManager = new VaultManager(vaultPath);
+        var settingsManager = new AppSettingsManager(Path.Combine(appDataDir, "settings.json"));
+        var settings = settingsManager.Load();
+
+        // 第一次啟動、還沒設定過 Vault 位置的話，用預設路徑並存回設定檔，之後都以設定檔為準。
+        if (string.IsNullOrWhiteSpace(settings.VaultPath))
+        {
+            settings.VaultPath = Path.Combine(appDataDir, "Vault");
+            settingsManager.Save(settings);
+        }
+
+        Directory.CreateDirectory(settings.VaultPath);
+
+        var vaultManager = new VaultManager(settings.VaultPath);
         var historyLogger = new HistoryLogger(Path.Combine(appDataDir, "history.jsonl"));
-        var lockService = new LockService(vaultManager, historyLogger);
+        var lockoutTracker = new LockoutTracker(Path.Combine(appDataDir, "lockout.json"));
+        var lockService = new LockService(vaultManager, historyLogger, lockoutTracker);
 
-        // Windows 雙擊 .locked 檔案時，會用「檔案路徑當作命令列參數」啟動這支程式。
-        // 判斷到這種情況就只開密碼小視窗，完全不建立/載入主視窗跟 WebView2，
-        // 這樣反應速度才能真正做到「幾乎瞬間跳出來」。
         if (e.Args.Length > 0 && LooksLikeLockedFileArgument(e.Args[0]))
         {
             var promptWindow = new PasswordPromptWindow(e.Args[0], vaultManager, lockService);
@@ -33,7 +46,7 @@ public partial class App : Application
         }
         else
         {
-            var mainWindow = new MainWindow(vaultManager, historyLogger, lockService);
+            var mainWindow = new MainWindow(vaultManager, historyLogger, lockService, settingsManager, settings, appDataDir);
             MainWindow = mainWindow;
             mainWindow.Show();
         }

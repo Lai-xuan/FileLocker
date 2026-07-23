@@ -4,6 +4,13 @@ import { ref, watch } from 'vue'
 const activeTab = ref('encrypt')
 const activeListSubTab = ref('files') // 'files' | 'history'
 
+// ---- 設定頁籤 ----
+const settingsVaultPath = ref('')
+const settingsLanguage = ref('zh-TW')
+const settingsTheme = ref('light')
+const settingsSaveMessage = ref('')
+const isChangingVaultPath = ref(false)
+
 // ---- 加密頁籤 ----
 const encryptPath = ref('')
 const encryptPassword = ref('')
@@ -141,6 +148,9 @@ if (isRunningInWebView2) {
             promptPasswordAndDecrypt(item, data.path)
           }
         }
+      } else if (data.purpose === 'vaultFolder') {
+        isChangingVaultPath.value = true
+        window.chrome.webview.postMessage({ type: 'changeVaultPath', newPath: data.path })
       } else {
         encryptPath.value = data.path
       }
@@ -157,6 +167,21 @@ if (isRunningInWebView2) {
       if (data.purpose === 'decryptDestination') {
         pendingDecryptItem.value = null
       }
+    } else if (data.type === 'settingsResult') {
+      settingsVaultPath.value = data.vaultPath
+      settingsLanguage.value = data.language
+      settingsTheme.value = data.theme
+    } else if (data.type === 'changeVaultPathResult') {
+      isChangingVaultPath.value = false
+      if (data.success) {
+        settingsVaultPath.value = data.newPath
+        settingsSaveMessage.value = '已完成搬移！請重新啟動 FileLocker 讓變更生效。'
+      } else {
+        alert(`搬移失敗：${data.errorMessage}`)
+      }
+    } else if (data.type === 'updateSettingResult') {
+      settingsSaveMessage.value = '已儲存。'
+      setTimeout(() => { settingsSaveMessage.value = '' }, 2000)
     }
   })
 }
@@ -164,6 +189,8 @@ if (isRunningInWebView2) {
 watch(activeTab, (tab) => {
   if (tab === 'list') {
     refreshList()
+  } else if (tab === 'settings') {
+    window.chrome.webview.postMessage({ type: 'getSettings' })
   }
 })
 
@@ -191,6 +218,20 @@ function pickFile() {
 
 function pickFolder() {
   window.chrome.webview.postMessage({ type: 'pickFolder' })
+}
+
+function pickVaultFolder() {
+  window.chrome.webview.postMessage({ type: 'pickVaultFolder' })
+}
+
+function setLanguage(value) {
+  settingsLanguage.value = value
+  window.chrome.webview.postMessage({ type: 'updateSetting', key: 'language', value })
+}
+
+function setTheme(value) {
+  settingsTheme.value = value
+  window.chrome.webview.postMessage({ type: 'updateSetting', key: 'theme', value })
 }
 
 function pickLockedFile() {
@@ -437,6 +478,7 @@ function historyDetailText(entry) {
       <button @click="activeTab = 'encrypt'" :disabled="activeTab === 'encrypt'">加密</button>
       <button @click="activeTab = 'decrypt'" :disabled="activeTab === 'decrypt'" style="margin-left: 0.5rem;">解密</button>
       <button @click="activeTab = 'list'" :disabled="activeTab === 'list'" style="margin-left: 0.5rem;">已加密清單</button>
+      <button @click="activeTab = 'settings'" :disabled="activeTab === 'settings'" style="margin-left: 0.5rem;">設定</button>
     </div>
 
     <div v-if="activeTab === 'encrypt'">
@@ -509,7 +551,7 @@ function historyDetailText(entry) {
       </p>
     </div>
 
-    <div v-else>
+    <div v-else-if="activeTab === 'list'">
       <h1>已加密清單</h1>
 
       <div style="margin-bottom: 1rem;">
@@ -600,6 +642,35 @@ function historyDetailText(entry) {
           </tbody>
         </table>
       </div>
+    </div>
+
+    <div v-else-if="activeTab === 'settings'">
+      <h1>設定</h1>
+
+      <div style="margin-bottom: 1.5rem;">
+        <h3>已加密檔案集中位置（Vault）</h3>
+        <p style="font-family: monospace; background: #f0f0f0; padding: 0.5rem; word-break: break-all;">{{ settingsVaultPath }}</p>
+        <button @click="pickVaultFolder" type="button" :disabled="isChangingVaultPath">
+          {{ isChangingVaultPath ? '搬移中...' : '搬移到新位置...' }}
+        </button>
+        <p style="color: #666; font-size: 0.9em;">選一個空資料夾，會把目前所有已加密的內容搬過去，搬移完成後需要重新啟動 FileLocker 才會生效。</p>
+      </div>
+
+      <div style="margin-bottom: 1.5rem;">
+        <h3>語言</h3>
+        <select :value="settingsLanguage" @change="setLanguage($event.target.value)">
+          <option value="zh-TW">繁體中文</option>
+        </select>
+      </div>
+
+      <div style="margin-bottom: 1.5rem;">
+        <h3>主題</h3>
+        <button @click="setTheme('light')" type="button" :disabled="settingsTheme === 'light'">☀️ 亮色</button>
+        <button @click="setTheme('dark')" type="button" :disabled="settingsTheme === 'dark'" style="margin-left: 0.5rem;">🌙 深色</button>
+        <p style="color: #666; font-size: 0.9em;">目前只會記住選擇，畫面實際套用主題的部分要等整體視覺設計階段才會實作。</p>
+      </div>
+
+      <p v-if="settingsSaveMessage" style="color: green;">{{ settingsSaveMessage }}</p>
     </div>
   </div>
 
