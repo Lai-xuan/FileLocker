@@ -392,4 +392,48 @@ public class LockServiceTests : IDisposable
         Assert.False(unlockResult.Success);
         Assert.Contains("沒有啟用恢復金鑰", unlockResult.ErrorMessage);
     }
+
+    [Fact]
+    public async Task RestoreFromKey_WithTamperedOriginalNameContainingPathTraversal_RejectsRestore()
+    {
+        // 模擬 .meta.json 被竄改：把 OriginalName 換成帶路徑穿越片段的惡意值。
+        var filePath = Path.Combine(_workDir.FullName, "正常檔案.txt");
+        File.WriteAllText(filePath, "內容");
+        var lockResult = await _service.EncryptAsync(filePath, "password", null, enableRecoveryKey: true);
+
+        var vault = new VaultManager(_vaultDir.FullName);
+        var metadata = vault.LoadMetadata(lockResult.Uuid)!;
+        metadata.OriginalName = "..\\..\\惡意檔案.txt";
+        vault.SaveMetadata(metadata);
+
+        var unlockResult = await _service.DecryptByRecoveryKeyAsync(lockResult.Uuid, lockResult.RecoveryKey!);
+
+        Assert.False(unlockResult.Success);
+        Assert.Contains("檔名", unlockResult.ErrorMessage);
+
+        var maliciousTarget = Path.Combine(_workDir.Parent!.FullName, "惡意檔案.txt");
+        Assert.False(File.Exists(maliciousTarget));
+    }
+
+    [Fact]
+    public async Task RestoreFromKey_WithTamperedOriginalNameAsAbsolutePath_RejectsRestore()
+    {
+        // 模擬更嚴重的情況：OriginalName 被直接換成一個絕對路徑，
+        // 如果沒有防護，Path.Combine 會直接忽略目的地資料夾，寫到這個絕對路徑去。
+        var filePath = Path.Combine(_workDir.FullName, "正常檔案2.txt");
+        File.WriteAllText(filePath, "內容");
+        var lockResult = await _service.EncryptAsync(filePath, "password", null, enableRecoveryKey: true);
+
+        var maliciousAbsolutePath = Path.Combine(_workDir.Parent!.FullName, "FileLockerAttackTarget.txt");
+
+        var vault = new VaultManager(_vaultDir.FullName);
+        var metadata = vault.LoadMetadata(lockResult.Uuid)!;
+        metadata.OriginalName = maliciousAbsolutePath;
+        vault.SaveMetadata(metadata);
+
+        var unlockResult = await _service.DecryptByRecoveryKeyAsync(lockResult.Uuid, lockResult.RecoveryKey!);
+
+        Assert.False(unlockResult.Success);
+        Assert.False(File.Exists(maliciousAbsolutePath));
+    }
 }

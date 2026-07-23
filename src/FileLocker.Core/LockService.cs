@@ -557,8 +557,41 @@ public class LockService
     /// 呼叫端負責把 encryptionKey 準備好（不管是密碼衍生、Passkey 解包，還是恢復金鑰解包出來的），
     /// 這裡負責用完清零；unlockMethod 只是拿來寫進使用紀錄，不影響解密邏輯本身。
     /// </summary>
+    /// <summary>
+    /// 安全檢查：metadata.OriginalName 理論上只會是加密當下用 Path.GetFileName 取出的單純檔名，
+    /// 但 .meta.json 是明文的本機檔案，沒有像 .locked 指標檔那樣有 HMAC 簽章保護，理論上可能被竄改或損毀。
+    /// 如果不檢查就直接拿去 Path.Combine，一個被竄改成絕對路徑（或帶 ".." 路徑穿越片段）的檔名，
+    /// 可能導致解密內容被寫到使用者指定的還原資料夾之外的任意位置——這裡在真的動筆寫檔案之前擋掉這種情況。
+    /// </summary>
+    private static bool IsSafeRestoreFileName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return false;
+        }
+        if (Path.IsPathRooted(name))
+        {
+            return false;
+        }
+        if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+        {
+            return false;
+        }
+        if (name.Contains("..", StringComparison.Ordinal))
+        {
+            return false;
+        }
+        return true;
+    }
+
     private UnlockResult RestoreFromKey(LockedItemMetadata metadata, byte[] encryptionKey, string destinationParentDir, string unlockMethod)
     {
+        if (!IsSafeRestoreFileName(metadata.OriginalName))
+        {
+            CryptographicOperations.ZeroMemory(encryptionKey);
+            return new UnlockResult(false, "", "這筆紀錄的檔名資訊看起來不正常（可能已損毀或被竄改），為了安全拒絕還原");
+        }
+
         var destinationPath = Path.Combine(destinationParentDir, metadata.OriginalName);
 
         if (metadata.Type == ItemType.Folder)
