@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("FileLocker.Core.Tests")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+447dcc759ce078af8d2cc8ce1382d50c7177a0f0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+5a1edec314661ed4cad34a02fc657c9d6b25b393")]
 [assembly: System.Reflection.AssemblyProductAttribute("FileLocker.Core.Tests")]
 [assembly: System.Reflection.AssemblyTitleAttribute("FileLocker.Core.Tests")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
