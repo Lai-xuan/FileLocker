@@ -14,8 +14,6 @@ namespace FileLocker.Core;
 /// </summary>
 public class LockService
 {
-    private const int HeaderLength = AesGcmCipher.NonceSizeBytes + AesGcmCipher.TagSizeBytes;
-
     private readonly VaultManager _vault;
     private readonly HistoryLogger? _history;
 
@@ -43,6 +41,19 @@ public class LockService
         }
 
         var type = isFolder ? ItemType.Folder : ItemType.File;
+
+        var originalName = isFolder
+            ? Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+            : Path.GetFileName(path);
+
+        // 先做這個便宜的檢查，才去做壓縮資料夾這種可能很花時間的工作——
+        // 目標位置已經有指標檔的話，應該儘早失敗，不要白白先把整個資料夾壓縮完才發現要失敗。
+        var markerPath = ComputeMarkerPath(path, isFolder);
+        if (File.Exists(markerPath))
+        {
+            return new LockResult(false, "", "", $"目標位置已經有一個指標檔了：{markerPath}");
+        }
+
         var nestedUuids = new List<string>();
         string contentPath;
         string? tempZipToCleanup = null;
@@ -68,39 +79,23 @@ public class LockService
                 contentPath = path;
             }
 
-            var originalName = isFolder
-                ? Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
-                : Path.GetFileName(path);
-
-            var markerPath = ComputeMarkerPath(path, isFolder);
-            if (File.Exists(markerPath))
-            {
-                return new LockResult(false, "", "", $"目標位置已經有一個指標檔了：{markerPath}");
-            }
+            var originalSizeBytes = new FileInfo(contentPath).Length;
 
             var salt = Argon2KeyDerivation.GenerateSalt();
             var derived = Argon2KeyDerivation.DeriveKeys(password, salt);
-            byte[] plaintext = File.ReadAllBytes(contentPath);
-            var originalSizeBytes = plaintext.LongLength;
+            var uuid = Guid.NewGuid().ToString();
 
-            byte[] nonce, ciphertext, tag;
+            // 串流處理：一次只把一個 chunk（預設 1MB）的明文留在記憶體，不管檔案多大，
+            // 記憶體用量都不會跟著檔案大小線性增加（見 ChunkedCipher 的分塊加密設計）。
             try
             {
-                (nonce, ciphertext, tag) = AesGcmCipher.Encrypt(derived.EncryptionKey, plaintext);
+                using var plaintextStream = File.OpenRead(contentPath);
+                using var encStream = _vault.OpenEncryptedContentWrite(uuid);
+                ChunkedCipher.EncryptStream(derived.EncryptionKey, plaintextStream, encStream);
             }
             finally
             {
                 CryptographicOperations.ZeroMemory(derived.EncryptionKey);
-                Array.Clear(plaintext, 0, plaintext.Length);
-            }
-
-            var uuid = Guid.NewGuid().ToString();
-
-            using (var encStream = _vault.OpenEncryptedContentWrite(uuid))
-            {
-                encStream.Write(nonce, 0, nonce.Length);
-                encStream.Write(tag, 0, tag.Length);
-                encStream.Write(ciphertext, 0, ciphertext.Length);
             }
 
             var vaultConfig = _vault.LoadOrCreateConfig();
@@ -283,76 +278,78 @@ public class LockService
             return new UnlockResult(false, "", "密碼錯誤");
         }
 
+        var destinationPath = Path.Combine(destinationParentDir, metadata.OriginalName);
+
+        if (metadata.Type == ItemType.Folder)
+        {
+            if (Directory.Exists(destinationPath))
+            {
+                CryptographicOperations.ZeroMemory(encryptionKey);
+                return new UnlockResult(false, "", $"還原失敗，目的地已經有同名資料夾：{destinationPath}");
+            }
+            Directory.CreateDirectory(FolderArchiver.TempDirectory);
+        }
+        else if (File.Exists(destinationPath))
+        {
+            CryptographicOperations.ZeroMemory(encryptionKey);
+            return new UnlockResult(false, "", $"還原失敗，目的地已經有同名檔案：{destinationPath}");
+        }
+
+        // 資料夾的話先解密寫進一個暫存 zip，再解壓縮還原成資料夾結構；檔案的話直接解密寫到目的地。
+        var actualWritePath = metadata.Type == ItemType.Folder
+            ? Path.Combine(FolderArchiver.TempDirectory, $"{Guid.NewGuid()}.zip")
+            : destinationPath;
+
         try
         {
-            byte[] rawContent;
-            using (var encStream = _vault.OpenEncryptedContentRead(metadata.Uuid))
-            using (var memoryStream = new MemoryStream())
-            {
-                encStream.CopyTo(memoryStream);
-                rawContent = memoryStream.ToArray();
-            }
-
-            if (rawContent.Length < HeaderLength)
-            {
-                return new UnlockResult(false, "", "加密內容已損毀（檔案長度不足）");
-            }
-
-            var nonce = rawContent[..AesGcmCipher.NonceSizeBytes];
-            var tag = rawContent[AesGcmCipher.NonceSizeBytes..HeaderLength];
-            var ciphertext = rawContent[HeaderLength..];
-
-            byte[] plaintext;
             try
             {
-                plaintext = AesGcmCipher.Decrypt(encryptionKey, nonce, ciphertext, tag);
+                // 串流解密：一次只處理一個 chunk，全程不會有「整份明文」同時存在記憶體裡。
+                using (var encStream = _vault.OpenEncryptedContentRead(metadata.Uuid))
+                using (var outputStream = File.Create(actualWritePath))
+                {
+                    ChunkedCipher.DecryptStream(encryptionKey, encStream, outputStream);
+                }
             }
-            catch (CryptographicException)
+            catch
             {
-                return new UnlockResult(false, "", "解密失敗，加密內容可能已損毀");
+                // 解密中途失敗（密碼錯誤在這裡不會發生，因為上面已經先驗證過；這裡會是內容損毀/被竄改），
+                // 不留下一個寫到一半、內容不完整的檔案在磁碟上誤導使用者。
+                if (File.Exists(actualWritePath))
+                {
+                    try { File.Delete(actualWritePath); } catch (IOException) { /* 盡力而為，清不掉就算了 */ }
+                }
+                throw;
             }
             finally
             {
                 CryptographicOperations.ZeroMemory(encryptionKey);
             }
 
-            var destinationPath = Path.Combine(destinationParentDir, metadata.OriginalName);
-
             if (metadata.Type == ItemType.Folder)
             {
-                if (Directory.Exists(destinationPath))
-                {
-                    return new UnlockResult(false, "", $"還原失敗，目的地已經有同名資料夾：{destinationPath}");
-                }
-
-                Directory.CreateDirectory(FolderArchiver.TempDirectory);
-                var tempZipPath = Path.Combine(FolderArchiver.TempDirectory, $"{Guid.NewGuid()}.zip");
                 try
                 {
-                    File.WriteAllBytes(tempZipPath, plaintext);
-                    FolderArchiver.ExtractZipToFolder(tempZipPath, destinationPath);
+                    FolderArchiver.ExtractZipToFolder(actualWritePath, destinationPath);
                 }
                 finally
                 {
-                    SecureFileEraser.OverwriteAndDelete(tempZipPath);
+                    SecureFileEraser.OverwriteAndDelete(actualWritePath);
                 }
             }
-            else
-            {
-                if (File.Exists(destinationPath))
-                {
-                    return new UnlockResult(false, "", $"還原失敗，目的地已經有同名檔案：{destinationPath}");
-                }
-
-                File.WriteAllBytes(destinationPath, plaintext);
-            }
-
-            Array.Clear(plaintext, 0, plaintext.Length);
 
             _vault.DeleteItem(metadata.Uuid);
             _history?.Append(new HistoryEntry(metadata.Uuid, metadata.OriginalName, HistoryAction.Decrypted, DateTimeOffset.UtcNow, null));
 
             return new UnlockResult(true, destinationPath);
+        }
+        catch (CryptographicException)
+        {
+            return new UnlockResult(false, "", "解密失敗，加密內容可能已損毀");
+        }
+        catch (InvalidDataException ex)
+        {
+            return new UnlockResult(false, "", $"解密失敗，加密內容已損毀：{ex.Message}");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

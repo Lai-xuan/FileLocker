@@ -145,27 +145,37 @@ public partial class MainWindow : Window
 
     private async Task HandleListVaultRequestAsync()
     {
-        var items = await Task.Run(() => _vaultManager.ScanAll()
-            .Select(m =>
-            {
-                var markerStatus = _lockService.CheckMarkerStatus(m);
-                return new
+        var items = await Task.Run(() =>
+        {
+            // 每一筆的 CheckMarkerStatus 都是各自獨立的檔案讀取，彼此不共用狀態，
+            // 用 AsParallel 讓多筆的檔案 I/O 可以同時進行，而不是一筆一筆排隊等——
+            // 項目數量少的時候感覺不出差異，項目一多（幾百筆）刷新清單會明顯變快。
+            var metadataList = _vaultManager.ScanAll().ToList();
+
+            return metadataList
+                .AsParallel()
+                .Select(m =>
                 {
-                    uuid = m.Uuid,
-                    originalName = m.OriginalName,
-                    originalPath = m.OriginalPath,
-                    type = m.Type.ToString(),
-                    originalSizeBytes = m.OriginalSizeBytes,
-                    hint = m.Hint,
-                    createdAtUtc = m.CreatedAtUtc,
-                    hasNestedLocks = m.ContainsNestedLocks.Count > 0,
-                    nestedLockCount = m.ContainsNestedLocks.Count,
-                    markerFound = markerStatus.Found,
-                    markerStatusMessage = markerStatus.Message
-                };
-            })
-            .OrderByDescending(m => m.createdAtUtc)
-            .ToList());
+                    var markerStatus = _lockService.CheckMarkerStatus(m);
+                    return new
+                    {
+                        uuid = m.Uuid,
+                        originalName = m.OriginalName,
+                        originalPath = m.OriginalPath,
+                        type = m.Type.ToString(),
+                        originalSizeBytes = m.OriginalSizeBytes,
+                        hint = m.Hint,
+                        createdAtUtc = m.CreatedAtUtc,
+                        hasNestedLocks = m.ContainsNestedLocks.Count > 0,
+                        nestedLockCount = m.ContainsNestedLocks.Count,
+                        markerFound = markerStatus.Found,
+                        markerStatusMessage = markerStatus.Message
+                    };
+                })
+                .ToList()
+                .OrderByDescending(m => m.createdAtUtc)
+                .ToList();
+        });
 
         SendToFrontend(new { type = "vaultList", items });
     }
