@@ -67,9 +67,14 @@ public partial class App : Application
             var listFilePath = args[0][1..];
             try
             {
-                return File.ReadAllLines(listFilePath)
+                var paths = File.ReadAllLines(listFilePath)
                     .Where(line => !string.IsNullOrWhiteSpace(line))
                     .ToList();
+
+                // 讀完就刪掉，內容是使用者選了哪些檔案路徑，沒必要一直留在 %TEMP% 裡。
+                try { File.Delete(listFilePath); } catch (IOException) { /* 盡力而為，刪不掉不影響主要流程 */ }
+
+                return paths;
             }
             catch (IOException)
             {

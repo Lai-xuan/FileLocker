@@ -5,7 +5,7 @@ using Konscious.Security.Cryptography;
 namespace FileLocker.Core.Crypto;
 
 /// <summary>
-/// 對應規格文件 0.2 節與 3.3 節：密碼延伸參數的預設值。
+/// 對應規格文件 0.2 節與 3.3 節：密碼延展參數的預設值。
 /// 數值先給常見的安全建議起點，之後可以依實際測試裝置的效能微調
 /// （記憶體成本越高越抗 GPU 暴力破解，但加解密會變慢，需要抓平衡）。
 /// </summary>
@@ -42,6 +42,11 @@ public static class Argon2KeyDerivation
     /// <summary>
     /// 用 Argon2id(password, salt) 衍生出主金鑰。
     /// 這一步是刻意設計成「慢」的（記憶體成本 + 時間成本），拖慢暴力破解的速度。
+    ///
+    /// 密碼安全性注意：Encoding.UTF8.GetBytes(password) 產生的中間位元組陣列用完會主動清零
+    /// （見 CryptographicOperations.ZeroMemory 呼叫），不留在記憶體裡比必要的時間更久——
+    /// 這是額外查資料庫審查時特別確認過的一點：這段位元組雖然只是密碼的 UTF-8 編碼副本，
+    /// 但既然拿得到它的參照，就沒有理由不清掉。
     /// </summary>
     public static byte[] DeriveMasterKey(
         string password,
@@ -50,15 +55,23 @@ public static class Argon2KeyDerivation
         int memoryCostKb = KeyDerivationDefaults.MemoryCostKb,
         int parallelism = KeyDerivationDefaults.Parallelism)
     {
-        using var argon2 = new Argon2id(Encoding.UTF8.GetBytes(password))
+        var passwordBytes = Encoding.UTF8.GetBytes(password);
+        try
         {
-            Salt = salt,
-            DegreeOfParallelism = parallelism,
-            MemorySize = memoryCostKb,
-            Iterations = timeCost
-        };
+            using var argon2 = new Argon2id(passwordBytes)
+            {
+                Salt = salt,
+                DegreeOfParallelism = parallelism,
+                MemorySize = memoryCostKb,
+                Iterations = timeCost
+            };
 
-        return argon2.GetBytes(KeyDerivationDefaults.MasterKeySizeBytes);
+            return argon2.GetBytes(KeyDerivationDefaults.MasterKeySizeBytes);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(passwordBytes);
+        }
     }
 
     /// <summary>

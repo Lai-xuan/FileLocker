@@ -52,6 +52,12 @@ const recoveryKeyPromptDestination = ref(null)
 const recoveryKeyPromptMarkerPath = ref(null)
 const recoveryKeyInputValue = ref('')
 
+// 密碼輸入彈窗：取代原本用瀏覽器原生 prompt() 明碼輸入密碼的做法——prompt() 的輸入框不會把
+// 打字內容用點點遮起來，旁邊有人看、或畫面被錄影/遠端連線時會直接看到密碼，這裡改用跟
+// 其他表單一致的遮罩密碼欄位。
+const passwordPromptContext = ref(null) // { mode: 'single' | 'batch', item或group, destinationDir }
+const passwordPromptValue = ref('')
+
 const isRunningInWebView2 = typeof window.chrome?.webview !== 'undefined'
 
 if (isRunningInWebView2) {
@@ -290,16 +296,8 @@ function toggleGroupExpanded(batchId) {
 }
 
 function decryptGroupViaPassword(group) {
-  const password = prompt(`輸入密碼，解鎖這批 ${group.items.length} 個項目（${batchPreviewText(group.items)}）：`)
-  if (password === null || password === '') {
-    return
-  }
-  decryptingBatchIds.value.add(group.batchId)
-  window.chrome.webview.postMessage({
-    type: 'decryptBatch',
-    uuids: group.items.map((i) => i.uuid),
-    password
-  })
+  passwordPromptContext.value = { mode: 'batch', group }
+  passwordPromptValue.value = ''
 }
 
 function refreshHistory() {
@@ -407,14 +405,35 @@ function decryptFromList(item) {
   }
 }
 
-// 密碼輸入還是先用原生 prompt（之後有專門的密碼小視窗時可以換掉這裡）；destinationDir 為 null 代表還原到原始位置。
+// destinationDir 為 null 代表還原到原始位置。
 function promptPasswordAndDecrypt(item, destinationDir) {
-  const password = prompt(`輸入「${item.originalName}」的密碼：`)
-  if (password === null || password === '') {
+  passwordPromptContext.value = { mode: 'single', item, destinationDir }
+  passwordPromptValue.value = ''
+}
+
+function submitPasswordPrompt() {
+  const ctx = passwordPromptContext.value
+  const password = passwordPromptValue.value
+  if (!ctx || !password) {
     return
   }
-  decryptingUuids.value.add(item.uuid)
-  window.chrome.webview.postMessage({ type: 'decryptByUuid', uuid: item.uuid, password, destinationDir })
+  passwordPromptContext.value = null
+
+  if (ctx.mode === 'batch') {
+    decryptingBatchIds.value.add(ctx.group.batchId)
+    window.chrome.webview.postMessage({
+      type: 'decryptBatch',
+      uuids: ctx.group.items.map((i) => i.uuid),
+      password
+    })
+  } else {
+    decryptingUuids.value.add(ctx.item.uuid)
+    window.chrome.webview.postMessage({ type: 'decryptByUuid', uuid: ctx.item.uuid, password, destinationDir: ctx.destinationDir })
+  }
+}
+
+function cancelPasswordPrompt() {
+  passwordPromptContext.value = null
 }
 
 // 清單頁用 Passkey 解密：一樣先問還原到原始位置、還是自己選地方存，不需要輸入密碼，
@@ -487,8 +506,23 @@ function cancelRecoveryKeyPrompt() {
 // 恢復金鑰顯示畫面：複製到剪貼簿。
 async function copyRecoveryKey() {
   try {
-    await navigator.clipboard.writeText(recoveryKeyDisplay.value)
+    const copiedValue = recoveryKeyDisplay.value
+    await navigator.clipboard.writeText(copiedValue)
     recoveryKeySaveState.value = recoveryKeySaveState.value || 'copied'
+
+    // 恢復金鑰等同密碼，留在剪貼簿裡風險不小（Windows 剪貼簿歷史紀錄會保留好幾筆之前複製過的內容，
+    // 甚至可能跨裝置同步）。比照密碼管理工具的慣例，過一段時間自動清空——但只有在剪貼簿裡還是
+    // 我們剛剛複製的這份內容時才清，避免蓋掉使用者後來自己複製的別的東西。
+    setTimeout(async () => {
+      try {
+        const current = await navigator.clipboard.readText()
+        if (current === copiedValue) {
+          await navigator.clipboard.writeText('')
+        }
+      } catch {
+        // 讀取剪貼簿失敗（例如視窗失去焦點時瀏覽器會擋）就算了，不強求。
+      }
+    }, 45000)
   } catch {
     alert('複製失敗，請手動選取文字複製。')
   }
@@ -871,11 +905,30 @@ function historyDetailText(entry) {
         <button @click="acknowledgeRecoveryKey" type="button">我已經抄下來了</button>
       </div>
       <p v-if="recoveryKeySaveState === 'saved'" style="color: green;">已存成檔案。</p>
-      <p v-if="recoveryKeySaveState === 'copied'" style="color: green;">已複製到剪貼簿。</p>
+      <p v-if="recoveryKeySaveState === 'copied'" style="color: green;">已複製到剪貼簿（45 秒後會自動清空，避免留在剪貼簿歷史紀錄裡）。</p>
       <div style="margin-top: 1rem; text-align: right;">
         <button @click="closeRecoveryKeyDisplay" type="button" :disabled="!recoveryKeySaveState">
           {{ recoveryKeySaveState ? '關閉' : '請先複製、存檔，或確認已抄下來' }}
         </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 密碼輸入彈窗：取代原本明碼顯示的 prompt()，用遮罩密碼欄位。 -->
+  <div v-if="passwordPromptContext" style="position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center;">
+    <div style="background: white; padding: 2rem; max-width: 480px; border-radius: 8px;">
+      <h2 style="margin-top: 0;">輸入密碼</h2>
+      <p v-if="passwordPromptContext.mode === 'single'">解鎖「{{ passwordPromptContext.item.originalName }}」</p>
+      <p v-else>解鎖這批 {{ passwordPromptContext.group.items.length }} 個項目（{{ batchPreviewText(passwordPromptContext.group.items) }}）</p>
+      <input
+        v-model="passwordPromptValue"
+        type="password"
+        style="width: 100%; padding: 0.5rem; box-sizing: border-box;"
+        @keyup.enter="submitPasswordPrompt"
+      />
+      <div style="margin-top: 1rem; display: flex; justify-content: flex-end; gap: 0.5rem;">
+        <button @click="cancelPasswordPrompt" type="button">取消</button>
+        <button @click="submitPasswordPrompt" type="button" :disabled="!passwordPromptValue">解鎖</button>
       </div>
     </div>
   </div>

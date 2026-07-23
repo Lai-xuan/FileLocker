@@ -43,6 +43,41 @@ public partial class MainWindow : Window
         Loaded += async (_, _) =>
         {
             await MainWebView.EnsureCoreWebView2Async();
+
+            // WebView2 安全性硬化：
+            // 1. 關掉密碼自動儲存/自動填入——不關的話，使用者在加密/解密表單輸入的密碼可能被
+            //    Chromium 內建的密碼管理員另外存一份，離開我們自己的掌控範圍，也弱化了「密碼不會被
+            //    存在任何地方」的安全宣稱。
+            // 2. 關掉 DevTools——避免任何能操作這個視窗的人直接開開發人員工具，檢視/竄改頁面狀態，
+            //    或直接呼叫 postMessage 橋接繞過正常的操作流程。
+            MainWebView.CoreWebView2.Settings.IsPasswordAutosaveEnabled = false;
+            MainWebView.CoreWebView2.Settings.IsGeneralAutofillEnabled = false;
+            MainWebView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+
+            // 右鍵選單：只有點在可編輯欄位（密碼／恢復金鑰輸入框）上才保留瀏覽器預設的剪下/複製/貼上選單，
+            // 其餘一律不顯示——原本 Chromium 內建的右鍵選單會有「上一頁」「重新整理」「檢視原始碼」
+            // 這類跟一般瀏覽器一樣的雜訊項目，在一個不是瀏覽器的桌面工具上沒有意義，關掉比較乾淨。
+            MainWebView.CoreWebView2.ContextMenuRequested += (_, ctxArgs) =>
+            {
+                if (!ctxArgs.ContextMenuTarget.IsEditable)
+                {
+                    ctxArgs.Handled = true;
+                }
+            };
+
+            // 目前開發階段載入的是本機 Vite 開發伺服器（http://localhost:5173），正式發布前必須
+            // 改成從封裝好的靜態檔案載入（見規格文件第 9 節），不能讓這個網址原封不動出貨——
+            // 這裡先加一層防禦性的導覽限制：只要嘗試導覽到不是我們預期的網址就直接擋下來，
+            // 避免本機同一個埠被其他程式搶先佔用時，載入到惡意頁面、透過 postMessage 橋接
+            // 取得跟我們自己前端一樣的權限去操控後端。
+            MainWebView.CoreWebView2.NavigationStarting += (_, navArgs) =>
+            {
+                if (!navArgs.Uri.StartsWith("http://localhost:5173/", StringComparison.Ordinal))
+                {
+                    navArgs.Cancel = true;
+                }
+            };
+
             MainWebView.CoreWebView2.Navigate("http://localhost:5173/");
             MainWebView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
             MainWebView.CoreWebView2.NavigationCompleted += (_, args) =>

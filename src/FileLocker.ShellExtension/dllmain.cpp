@@ -26,6 +26,46 @@ static HMODULE g_hModule = nullptr;
 /// 找不到就退回開發階段的暫時路徑，直接指向 dotnet build 產生的執行檔位置——
 /// 等安裝程式做好之後，這裡要改成從安裝程式寫入的登錄檔讀取真正的安裝路徑。
 /// </summary>
+/// <summary>
+/// 正確處理 Windows 命令列參數的引號逃脫，比照微軟官方文件的標準演算法——
+/// 單純用「路徑前後各包一個雙引號」在路徑結尾剛好是奇數個反斜線時會出錯（那個反斜線會
+/// 逃脫掉我們補上去的關閉引號，導致這個參數沒有真的結束、後面的參數解析全部跟著錯亂）。
+/// NTFS 檔名本身不能包含雙引號，但這裡還是做完整處理，不只賭「檔名不會有問題字元」。
+/// </summary>
+static std::wstring QuoteArgument(const std::wstring& argument)
+{
+    std::wstring result = L"\"";
+    for (auto it = argument.begin(); ; ++it)
+    {
+        unsigned backslashes = 0;
+        while (it != argument.end() && *it == L'\\')
+        {
+            ++it;
+            ++backslashes;
+        }
+
+        if (it == argument.end())
+        {
+            // 結尾的反斜線後面接的是我們要補上的關閉引號，反斜線數量要翻倍，
+            // 不然會被解析成「逃脫掉關閉引號」，這個參數就不會真的結束。
+            result.append(backslashes * 2, L'\\');
+            break;
+        }
+        else if (*it == L'"')
+        {
+            result.append(backslashes * 2 + 1, L'\\');
+            result.push_back(L'"');
+        }
+        else
+        {
+            result.append(backslashes, L'\\');
+            result.push_back(*it);
+        }
+    }
+    result.push_back(L'"');
+    return result;
+}
+
 static std::wstring GetFileLockerAppPath()
 {
     wchar_t modulePath[MAX_PATH];
@@ -206,14 +246,14 @@ public:
             }
             CloseHandle(hFile);
 
-            commandLine = L"\"" + appPath + L"\" \"@" + std::wstring(tempFileName) + L"\"";
+            commandLine = QuoteArgument(appPath) + L" " + QuoteArgument(L"@" + std::wstring(tempFileName));
         }
         else
         {
-            commandLine = L"\"" + appPath + L"\"";
+            commandLine = QuoteArgument(appPath);
             for (const auto& path : m_selectedFiles)
             {
-                commandLine += L" \"" + path + L"\"";
+                commandLine += L" " + QuoteArgument(path);
             }
         }
 
