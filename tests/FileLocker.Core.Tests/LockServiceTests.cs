@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using FileLocker.Core.History;
 using FileLocker.Core.Models;
+using FileLocker.Core.Security;
 using FileLocker.Core.Vault;
 using Xunit;
 
@@ -12,6 +13,7 @@ public class LockServiceTests : IDisposable
     private readonly DirectoryInfo _workDir; // 模擬使用者的「文件」資料夾
     private readonly DirectoryInfo _historyDir;
     private readonly HistoryLogger _history;
+    private readonly LockoutTracker _lockout;
     private readonly LockService _service;
 
     public LockServiceTests()
@@ -20,7 +22,8 @@ public class LockServiceTests : IDisposable
         _workDir = Directory.CreateTempSubdirectory("FileLockerWork_");
         _historyDir = Directory.CreateTempSubdirectory("FileLockerHistory_");
         _history = new HistoryLogger(Path.Combine(_historyDir.FullName, "history.jsonl"));
-        _service = new LockService(new VaultManager(_vaultDir.FullName), _history);
+        _lockout = new LockoutTracker(Path.Combine(_historyDir.FullName, "lockout.json"));
+        _service = new LockService(new VaultManager(_vaultDir.FullName), _history, _lockout);
     }
 
     public void Dispose()
@@ -466,5 +469,55 @@ public class LockServiceTests : IDisposable
         {
             customDestDir.Delete(recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task DecryptAsync_AfterFiveFailedAttempts_LocksOutEvenWithCorrectPassword()
+    {
+        var filePath = Path.Combine(_workDir.FullName, "鎖定測試.txt");
+        File.WriteAllText(filePath, "內容");
+        var lockResult = await _service.EncryptAsync(filePath, "correct-password", null);
+
+        for (var i = 0; i < 5; i++)
+        {
+            await _service.DecryptAsync(lockResult.LockedMarkerPath, "wrong-password");
+        }
+
+        var result = await _service.DecryptAsync(lockResult.LockedMarkerPath, "correct-password");
+
+        Assert.False(result.Success);
+        Assert.Contains("錯誤次數過多", result.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task DecryptAsync_SuccessfulUnlock_ResetsFailedAttemptCounter()
+    {
+        var filePath = Path.Combine(_workDir.FullName, "重置測試.txt");
+        File.WriteAllText(filePath, "內容");
+        var lockResult = await _service.EncryptAsync(filePath, "correct-password", null);
+
+        await _service.DecryptAsync(lockResult.LockedMarkerPath, "wrong-password");
+        await _service.DecryptAsync(lockResult.LockedMarkerPath, "wrong-password");
+
+        var successResult = await _service.DecryptAsync(lockResult.LockedMarkerPath, "correct-password");
+
+        Assert.True(successResult.Success);
+    }
+
+    [Fact]
+    public async Task DecryptAsync_FewerThanThresholdFailures_StillAllowsCorrectPassword()
+    {
+        var filePath = Path.Combine(_workDir.FullName, "未達門檻測試.txt");
+        File.WriteAllText(filePath, "內容");
+        var lockResult = await _service.EncryptAsync(filePath, "correct-password", null);
+
+        for (var i = 0; i < 3; i++)
+        {
+            await _service.DecryptAsync(lockResult.LockedMarkerPath, "wrong-password");
+        }
+
+        var result = await _service.DecryptAsync(lockResult.LockedMarkerPath, "correct-password");
+
+        Assert.True(result.Success);
     }
 }

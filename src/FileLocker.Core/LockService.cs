@@ -4,6 +4,7 @@ using FileLocker.Core.FolderPackaging;
 using FileLocker.Core.History;
 using FileLocker.Core.Models;
 using FileLocker.Core.SecureDelete;
+using FileLocker.Core.Security;
 using FileLocker.Core.Vault;
 
 namespace FileLocker.Core;
@@ -16,15 +17,17 @@ public class LockService
 {
     private readonly VaultManager _vault;
     private readonly HistoryLogger? _history;
+    private readonly LockoutTracker? _lockout;
 
     /// <summary>
-    /// historyLogger 是選填的：CLI 原型或單元測試不一定需要歷史紀錄，傳 null 就單純不記錄，
+    /// historyLogger／lockoutTracker 都是選填的：CLI 原型或單元測試不一定需要，傳 null 就單純不記錄／不鎖定，
     /// 不影響加密/解密本身的行為。
     /// </summary>
-    public LockService(VaultManager vault, HistoryLogger? historyLogger = null)
+    public LockService(VaultManager vault, HistoryLogger? historyLogger = null, LockoutTracker? lockoutTracker = null)
     {
         _vault = vault;
         _history = historyLogger;
+        _lockout = lockoutTracker;
     }
 
     /// <summary>
@@ -591,6 +594,15 @@ public class LockService
     /// <summary>密碼路徑：驗證密碼、拿到內容金鑰後，交給 RestoreFromKey 做剩下的還原工作。</summary>
     private UnlockResult DecryptAndRestore(LockedItemMetadata metadata, string password, string destinationParentDir)
     {
+        if (_lockout is not null)
+        {
+            var lockoutStatus = _lockout.CheckStatus(metadata.Uuid);
+            if (lockoutStatus.IsLockedOut)
+            {
+                return new UnlockResult(false, "", $"密碼錯誤次數過多，請在 {FormatRemaining(lockoutStatus.RemainingLockout!.Value)}後再試");
+            }
+        }
+
         var salt = Convert.FromBase64String(metadata.Salt);
         var storedHash = Convert.FromBase64String(metadata.PasswordVerificationHash);
 
@@ -600,10 +612,19 @@ public class LockService
 
         if (!isValid || encryptionKey is null)
         {
+            _lockout?.RecordFailedAttempt(metadata.Uuid);
             return new UnlockResult(false, "", "密碼錯誤");
         }
 
+        _lockout?.RecordSuccess(metadata.Uuid);
         return RestoreFromKey(metadata, encryptionKey, destinationParentDir, "password");
+    }
+
+    private static string FormatRemaining(TimeSpan remaining)
+    {
+        return remaining.TotalMinutes >= 1
+            ? $"{Math.Ceiling(remaining.TotalMinutes)} 分鐘"
+            : $"{Math.Ceiling(remaining.TotalSeconds)} 秒";
     }
 
     /// <summary>
