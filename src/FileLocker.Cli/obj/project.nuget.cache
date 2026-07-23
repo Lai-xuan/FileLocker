@@ -1,11 +1,12 @@
 {
   "version": 2,
-  "dgSpecHash": "cM7+c75y29E=",
+  "dgSpecHash": "0xgJAyjrETo=",
   "success": true,
   "projectFilePath": "D:\\FileLocker_專案\\FileLocker\\src\\FileLocker.Cli\\FileLocker.Cli.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\04209\\.nuget\\packages\\konscious.security.cryptography.argon2\\1.3.1\\konscious.security.cryptography.argon2.1.3.1.nupkg.sha512",
-    "C:\\Users\\04209\\.nuget\\packages\\konscious.security.cryptography.blake2\\1.1.1\\konscious.security.cryptography.blake2.1.1.1.nupkg.sha512"
+    "C:\\Users\\04209\\.nuget\\packages\\konscious.security.cryptography.blake2\\1.1.1\\konscious.security.cryptography.blake2.1.1.1.nupkg.sha512",
+    "C:\\Users\\04209\\.nuget\\packages\\microsoft.windows.sdk.net.ref\\10.0.19041.57\\microsoft.windows.sdk.net.ref.10.0.19041.57.nupkg.sha512"
   ],
   "logs": []
 }

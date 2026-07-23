@@ -320,4 +320,76 @@ public class LockServiceTests : IDisposable
             Assert.NotNull(new VaultManager(_vaultDir.FullName).LoadMetadata(result.Uuid)); // Vault 裡的紀錄也在
         }
     }
+
+    [Fact]
+    public async Task EncryptAsync_WithRecoveryKeyEnabled_ReturnsDisplayableRecoveryKey()
+    {
+        var filePath = Path.Combine(_workDir.FullName, "恢復金鑰測試.txt");
+        File.WriteAllText(filePath, "內容");
+
+        var result = await _service.EncryptAsync(filePath, "password", null, enableRecoveryKey: true);
+
+        Assert.True(result.Success);
+        Assert.NotNull(result.RecoveryKey);
+        Assert.Contains("-", result.RecoveryKey); // 應該是分組格式，不是一長串沒有分隔的字元
+
+        var metadata = new VaultManager(_vaultDir.FullName).LoadMetadata(result.Uuid);
+        Assert.True(metadata!.RecoveryKeyEnabled);
+    }
+
+    [Fact]
+    public async Task EncryptAsync_WithoutRecoveryKey_ReturnsNullRecoveryKey()
+    {
+        var filePath = Path.Combine(_workDir.FullName, "沒開恢復金鑰.txt");
+        File.WriteAllText(filePath, "內容");
+
+        var result = await _service.EncryptAsync(filePath, "password", null);
+
+        Assert.Null(result.RecoveryKey);
+    }
+
+    [Fact]
+    public async Task DecryptByRecoveryKeyAsync_WithCorrectKey_RestoresContentWithoutPassword()
+    {
+        var filePath = Path.Combine(_workDir.FullName, "用恢復金鑰解密.txt");
+        File.WriteAllText(filePath, "只有恢復金鑰知道的內容");
+
+        var encryptResult = await _service.EncryptAsync(filePath, "password", null, enableRecoveryKey: true);
+        Assert.NotNull(encryptResult.RecoveryKey);
+
+        var unlockResult = await _service.DecryptByRecoveryKeyAsync(encryptResult.Uuid, encryptResult.RecoveryKey!);
+
+        Assert.True(unlockResult.Success);
+        Assert.Equal("只有恢復金鑰知道的內容", File.ReadAllText(filePath));
+    }
+
+    [Fact]
+    public async Task DecryptByRecoveryKeyAsync_WithWrongKey_Fails()
+    {
+        var filePath = Path.Combine(_workDir.FullName, "恢復金鑰錯誤測試.txt");
+        File.WriteAllText(filePath, "內容");
+
+        var encryptResult = await _service.EncryptAsync(filePath, "password", null, enableRecoveryKey: true);
+        var wrongKey = FileLocker.Core.Crypto.RecoveryKeyProtector.FormatForDisplay(
+            FileLocker.Core.Crypto.RecoveryKeyProtector.GenerateRecoveryKeyBytes());
+
+        var unlockResult = await _service.DecryptByRecoveryKeyAsync(encryptResult.Uuid, wrongKey);
+
+        Assert.False(unlockResult.Success);
+        Assert.False(File.Exists(filePath)); // 沒有還原
+    }
+
+    [Fact]
+    public async Task DecryptByRecoveryKeyAsync_WhenNotEnabled_ReturnsClearError()
+    {
+        var filePath = Path.Combine(_workDir.FullName, "沒開恢復金鑰_解密測試.txt");
+        File.WriteAllText(filePath, "內容");
+
+        var encryptResult = await _service.EncryptAsync(filePath, "password", null); // 沒開恢復金鑰
+
+        var unlockResult = await _service.DecryptByRecoveryKeyAsync(encryptResult.Uuid, "ABCDE-FGHIJ-KLMNO-PQRST-UVWXY-ZABCD-EFGHI-JKLMN-OPQRS-TUVWX-YZABC");
+
+        Assert.False(unlockResult.Success);
+        Assert.Contains("沒有啟用恢復金鑰", unlockResult.ErrorMessage);
+    }
 }

@@ -1,7 +1,7 @@
 {
   "version": 4,
   "targets": {
-    "net10.0": {
+    "net10.0-windows10.0.19041.0": {
       "coverlet.collector/6.0.4": {
         "type": "package",
         "build": {
@@ -991,7 +991,7 @@
     }
   },
   "projectFileDependencyGroups": {
-    "net10.0": [
+    "net10.0-windows10.0.19041.0": [
       "FileLocker.Core >= 1.0.0",
       "Microsoft.NET.Test.Sdk >= 17.14.1",
       "coverlet.collector >= 6.0.4",
@@ -1021,16 +1021,16 @@
         "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
       ],
       "originalTargetFrameworks": [
-        "net10.0"
+        "net10.0-windows10.0.19041.0"
       ],
       "sources": {
         "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
         "https://api.nuget.org/v3/index.json": {}
       },
       "frameworks": {
-        "net10.0": {
-          "framework": "net10.0",
-          "targetAlias": "net10.0",
+        "net10.0-windows10.0.19041.0": {
+          "framework": "net10.0-windows10.0.19041",
+          "targetAlias": "net10.0-windows10.0.19041.0",
           "projectReferences": {
             "D:\\FileLocker_專案\\FileLocker\\src\\FileLocker.Core\\FileLocker.Core.csproj": {
               "projectPath": "D:\\FileLocker_專案\\FileLocker\\src\\FileLocker.Core\\FileLocker.Core.csproj"
@@ -1051,9 +1051,9 @@
       "SdkAnalysisLevel": "10.0.300"
     },
     "frameworks": {
-      "net10.0": {
-        "framework": "net10.0",
-        "targetAlias": "net10.0",
+      "net10.0-windows10.0.19041.0": {
+        "framework": "net10.0-windows10.0.19041",
+        "targetAlias": "net10.0-windows10.0.19041.0",
         "dependencies": {
           "Microsoft.NET.Test.Sdk": {
             "target": "Package",
@@ -1083,8 +1083,17 @@
         ],
         "assetTargetFallback": true,
         "warn": true,
+        "downloadDependencies": [
+          {
+            "name": "Microsoft.Windows.SDK.NET.Ref",
+            "version": "[10.0.19041.57, 10.0.19041.57]"
+          }
+        ],
         "frameworkReferences": {
           "Microsoft.NETCore.App": {
+            "privateAssets": "all"
+          },
+          "Microsoft.Windows.SDK.NET.Ref.Windows": {
             "privateAssets": "all"
           }
         },

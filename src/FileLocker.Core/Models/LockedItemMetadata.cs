@@ -44,4 +44,26 @@ public class LockedItemMetadata
     /// 只要這個清單不是空的，UI／LockService 在刪除這筆紀錄前必須擋下來，見 LockService.TryDeleteRecordAsync。
     /// </summary>
     public List<string> ContainsNestedLocks { get; set; } = new();
+
+    // ---- 對應規格文件 8.1 節「Passkey 快速解鎖」，以下四個欄位只有啟用時才會有值 ----
+
+    /// <summary>是否有為這個項目啟用 Passkey 快速解鎖。false 時，下面三個欄位一律為 null。</summary>
+    public bool PasskeyEnabled { get; set; }
+
+    /// <summary>這個項目專屬的 Windows Hello 裝置金鑰名稱（帶隨機 GUID，見 PasskeyProtector.GenerateCredentialName）。</summary>
+    public string? PasskeyCredentialName { get; set; }
+
+    /// <summary>簽章用的隨機挑戰資料（Base64）。本身不是機密，外洩也沒關係，純粹是簽章的輸入。</summary>
+    public string? PasskeyChallenge { get; set; }
+
+    /// <summary>用 Passkey 簽章衍生出的包裝金鑰加密過的內容金鑰（Base64），格式：Nonce+Tag+Ciphertext。</summary>
+    public string? PasskeyWrappedContentKey { get; set; }
+
+    // ---- 對應規格文件「恢復金鑰」，以下欄位只有啟用時才會有值 ----
+
+    /// <summary>是否有為這個項目啟用恢復金鑰。false 時，下面的欄位為 null。</summary>
+    public bool RecoveryKeyEnabled { get; set; }
+
+    /// <summary>用恢復金鑰衍生出的包裝金鑰加密過的內容金鑰（Base64），格式同 PasskeyWrappedContentKey。</summary>
+    public string? RecoveryKeyWrappedContentKey { get; set; }
 }

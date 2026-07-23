@@ -13,8 +13,21 @@ public enum HistoryAction
 /// 對應「使用紀錄」頁的一筆資料。跟 Vault 內的 .meta.json 是分開的兩件事：
 /// 這筆紀錄就算對應的加密項目已經從 Vault 移除（被解密或刪除），也會繼續留著，
 /// 單純是本機的操作留痕，不隨 Vault 雲端同步。
+/// SourcePath／PasskeyEnabled／RecoveryKeyEnabled 只在 Encrypted 這筆才會有值；
+/// UnlockMethod／RestoredPath 只在 Decrypted 這筆才會有值——都是選填欄位，
+/// 舊版寫下的紀錄檔沒有這些欄位也能正常讀取（自動視為 null），不會壞掉。
 /// </summary>
-public record HistoryEntry(string Uuid, string OriginalName, HistoryAction Action, DateTimeOffset TimestampUtc, string? Detail);
+public record HistoryEntry(
+    string Uuid,
+    string OriginalName,
+    HistoryAction Action,
+    DateTimeOffset TimestampUtc,
+    string? Detail,
+    string? SourcePath = null,
+    bool? PasskeyEnabled = null,
+    bool? RecoveryKeyEnabled = null,
+    string? UnlockMethod = null,
+    string? RestoredPath = null);
 
 /// <summary>
 /// 用 JSON Lines 格式（每行一筆 JSON）附加寫入的簡單歷史紀錄檔，存在本機（不在 Vault 內）。

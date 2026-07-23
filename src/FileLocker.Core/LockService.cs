@@ -27,10 +27,17 @@ public class LockService
         _history = historyLogger;
     }
 
-    public Task<LockResult> EncryptAsync(string path, string password, string? hint, IProgress<double>? progress = null)
-        => Task.Run(() => EncryptCore(path, password, hint));
-
-    private LockResult EncryptCore(string path, string password, string? hint)
+    /// <summary>
+    /// 注意：這裡刻意不整個包進 Task.Run——實測發現 Passkey 相關的 WinRT 呼叫如果整個在背景執行緒
+    /// 上執行，第二次（簽章）的 Windows Hello 驗證視窗會抓不到正確的視窗焦點/啟用狀態（懷疑跟 WinRT
+    /// 的執行緒環境有關）。只有純檔案 I/O／加密運算的部分（EncryptToVault）丟進背景執行緒，
+    /// Passkey 相關呼叫留在呼叫端原本的執行緒（通常是 UI 執行緒）上直接 await。
+    /// </summary>
+    public async Task<LockResult> EncryptAsync(
+        string path, string password, string? hint,
+        bool enablePasskey = false, IntPtr ownerWindowHandle = default,
+        bool enableRecoveryKey = false,
+        IProgress<double>? progress = null)
     {
         var isFolder = Directory.Exists(path);
         var isFile = File.Exists(path);
@@ -54,6 +61,180 @@ public class LockService
             return new LockResult(false, "", "", $"目標位置已經有一個指標檔了：{markerPath}");
         }
 
+        EncryptionResult encryptResult;
+        try
+        {
+            encryptResult = await Task.Run(() => EncryptToVault(path, isFolder, password));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return new LockResult(false, "", "", $"加密過程發生錯誤：{ex.Message}");
+        }
+
+        try
+        {
+            if (!encryptResult.Success)
+            {
+                return new LockResult(false, "", "", encryptResult.ErrorMessage);
+            }
+
+            string? passkeyCredentialName = null;
+            string? passkeyChallengeBase64 = null;
+            string? passkeyWrappedKeyBase64 = null;
+
+            // 對應規格文件 8.1 節：Passkey 是「額外」的一道門，這裡失敗（不支援裝置、使用者取消、
+            // 驗證失敗）都不影響密碼加密本身的成功與否，只是這個項目最終沒有啟用 Passkey 快速解鎖。
+            if (enablePasskey && await PasskeyProtector.IsSupportedAsync())
+            {
+                var credentialName = PasskeyProtector.GenerateCredentialName();
+                if (await PasskeyProtector.CreateCredentialAsync(credentialName, ownerWindowHandle))
+                {
+                    var challenge = PasskeyProtector.GenerateChallenge();
+                    var signature = await PasskeyProtector.SignChallengeAsync(credentialName, challenge, ownerWindowHandle);
+
+                    if (signature is not null)
+                    {
+                        var wrappingKey = PasskeyProtector.DeriveWrappingKey(signature);
+                        try
+                        {
+                            passkeyWrappedKeyBase64 = PasskeyProtector.WrapContentKey(wrappingKey, encryptResult.EncryptionKey!);
+                            passkeyCredentialName = credentialName;
+                            passkeyChallengeBase64 = Convert.ToBase64String(challenge);
+                        }
+                        finally
+                        {
+                            CryptographicOperations.ZeroMemory(wrappingKey);
+                            CryptographicOperations.ZeroMemory(signature);
+                        }
+                    }
+                    else
+                    {
+                        // 使用者取消或驗證失敗：清掉剛剛建立的裝置金鑰，不留下一把沒被用到的憑證。
+                        await PasskeyProtector.DeleteCredentialAsync(credentialName);
+                    }
+                }
+            }
+
+            string? recoveryKeyWrappedBase64 = null;
+            string? recoveryKeyDisplayText = null;
+
+            // 恢復金鑰是純本機運算（產生隨機值、HKDF、AES-GCM），不牽涉任何 Windows API，
+            // 不需要像 Passkey 那樣顧慮執行緒環境，直接同步做完即可。
+            if (enableRecoveryKey)
+            {
+                var recoveryKeyBytes = RecoveryKeyProtector.GenerateRecoveryKeyBytes();
+                try
+                {
+                    recoveryKeyDisplayText = RecoveryKeyProtector.FormatForDisplay(recoveryKeyBytes);
+                    var wrappingKey = RecoveryKeyProtector.DeriveWrappingKey(recoveryKeyBytes);
+                    try
+                    {
+                        recoveryKeyWrappedBase64 = RecoveryKeyProtector.WrapContentKey(wrappingKey, encryptResult.EncryptionKey!);
+                    }
+                    finally
+                    {
+                        CryptographicOperations.ZeroMemory(wrappingKey);
+                    }
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(recoveryKeyBytes);
+                }
+            }
+
+            var vaultConfig = _vault.LoadOrCreateConfig();
+
+            var metadata = new LockedItemMetadata
+            {
+                Uuid = encryptResult.Uuid!,
+                OriginalName = originalName,
+                OriginalPath = path,
+                PasswordVerificationHash = encryptResult.PasswordVerificationHashBase64!,
+                Salt = encryptResult.SaltBase64!,
+                Argon2TimeCost = KeyDerivationDefaults.TimeCost,
+                Argon2MemoryCostKb = KeyDerivationDefaults.MemoryCostKb,
+                Argon2Parallelism = KeyDerivationDefaults.Parallelism,
+                Hint = hint,
+                Type = type,
+                OriginalSizeBytes = encryptResult.OriginalSizeBytes,
+                CreatedAtUtc = DateTimeOffset.UtcNow,
+                ContainsNestedLocks = encryptResult.NestedUuids!,
+                PasskeyEnabled = passkeyWrappedKeyBase64 is not null,
+                PasskeyCredentialName = passkeyCredentialName,
+                PasskeyChallenge = passkeyChallengeBase64,
+                PasskeyWrappedContentKey = passkeyWrappedKeyBase64,
+                RecoveryKeyEnabled = recoveryKeyWrappedBase64 is not null,
+                RecoveryKeyWrappedContentKey = recoveryKeyWrappedBase64
+            };
+            _vault.SaveMetadata(metadata);
+
+            var signingKey = Convert.FromBase64String(vaultConfig.SigningKeyBase64);
+            var marker = LockedMarkerFile.Create(encryptResult.Uuid!, signingKey);
+            marker.WriteTo(markerPath);
+
+            // 到這裡，加密內容、metadata、marker 都已經成功寫入——資料本身已經安全了。
+            // 清除原始明文是「收尾」動作，這一步就算失敗，也不代表加密本身失敗，
+            // 所以特別包一層自己的 try/catch，不讓它跟著外層的 catch 把整個結果判定成失敗
+            // （否則使用者會看到「加密失敗」，卻不知道其實 Vault 裡已經有一份有效的加密紀錄了）。
+            string? cleanupWarning = null;
+            try
+            {
+                await Task.Run(() =>
+                {
+                    if (isFolder)
+                    {
+                        SecureFileEraser.OverwriteAndDeleteFolder(path);
+                    }
+                    else
+                    {
+                        SecureFileEraser.OverwriteAndDelete(path);
+                    }
+                });
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                cleanupWarning = $"加密已完成，但清除原始檔案時發生錯誤，請手動確認並刪除原始檔案：{ex.Message}";
+            }
+
+            _history?.Append(new HistoryEntry(
+                encryptResult.Uuid!, originalName, HistoryAction.Encrypted, DateTimeOffset.UtcNow, hint,
+                SourcePath: path,
+                PasskeyEnabled: passkeyWrappedKeyBase64 is not null,
+                RecoveryKeyEnabled: recoveryKeyWrappedBase64 is not null));
+
+            return new LockResult(true, encryptResult.Uuid!, markerPath, cleanupWarning, recoveryKeyDisplayText);
+        }
+        finally
+        {
+            if (encryptResult.EncryptionKey is not null)
+            {
+                CryptographicOperations.ZeroMemory(encryptResult.EncryptionKey);
+            }
+            if (encryptResult.TempZipPath is not null)
+            {
+                SecureFileEraser.OverwriteAndDelete(encryptResult.TempZipPath);
+            }
+        }
+    }
+
+    private sealed record EncryptionResult(
+        bool Success,
+        string? ErrorMessage,
+        string? Uuid,
+        byte[]? EncryptionKey,
+        string? PasswordVerificationHashBase64,
+        string? SaltBase64,
+        long OriginalSizeBytes,
+        List<string>? NestedUuids,
+        string? TempZipPath);
+
+    /// <summary>
+    /// 純粹的檔案 I/O／加密運算部分，不牽涉任何 Windows Hello / WinRT 呼叫，安全地丟進背景執行緒執行。
+    /// 回傳的 EncryptionKey 刻意不在這裡清零——呼叫端（EncryptAsync）還要拿它去做 Passkey 包裝，
+    /// 用完才會清零，見 EncryptAsync 的 finally 區塊。
+    /// </summary>
+    private EncryptionResult EncryptToVault(string path, bool isFolder, string password)
+    {
         var nestedUuids = new List<string>();
         string contentPath;
         string? tempZipToCleanup = null;
@@ -87,76 +268,21 @@ public class LockService
 
             // 串流處理：一次只把一個 chunk（預設 1MB）的明文留在記憶體，不管檔案多大，
             // 記憶體用量都不會跟著檔案大小線性增加（見 ChunkedCipher 的分塊加密設計）。
-            try
+            using (var plaintextStream = File.OpenRead(contentPath))
+            using (var encStream = _vault.OpenEncryptedContentWrite(uuid))
             {
-                using var plaintextStream = File.OpenRead(contentPath);
-                using var encStream = _vault.OpenEncryptedContentWrite(uuid);
                 ChunkedCipher.EncryptStream(derived.EncryptionKey, plaintextStream, encStream);
             }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(derived.EncryptionKey);
-            }
 
-            var vaultConfig = _vault.LoadOrCreateConfig();
-
-            var metadata = new LockedItemMetadata
-            {
-                Uuid = uuid,
-                OriginalName = originalName,
-                OriginalPath = path,
-                PasswordVerificationHash = Convert.ToBase64String(derived.VerificationHash),
-                Salt = Convert.ToBase64String(salt),
-                Argon2TimeCost = KeyDerivationDefaults.TimeCost,
-                Argon2MemoryCostKb = KeyDerivationDefaults.MemoryCostKb,
-                Argon2Parallelism = KeyDerivationDefaults.Parallelism,
-                Hint = hint,
-                Type = type,
-                OriginalSizeBytes = originalSizeBytes,
-                CreatedAtUtc = DateTimeOffset.UtcNow,
-                ContainsNestedLocks = nestedUuids
-            };
-            _vault.SaveMetadata(metadata);
-
-            var signingKey = Convert.FromBase64String(vaultConfig.SigningKeyBase64);
-            var marker = LockedMarkerFile.Create(uuid, signingKey);
-            marker.WriteTo(markerPath);
-
-            // 到這裡，加密內容、metadata、marker 都已經成功寫入——資料本身已經安全了。
-            // 清除原始明文是「收尾」動作，這一步就算失敗，也不代表加密本身失敗，
-            // 所以特別包一層自己的 try/catch，不讓它跟著外層的 catch 把整個結果判定成失敗
-            // （否則使用者會看到「加密失敗」，卻不知道其實 Vault 裡已經有一份有效的加密紀錄了）。
-            string? cleanupWarning = null;
-            try
-            {
-                if (isFolder)
-                {
-                    SecureFileEraser.OverwriteAndDeleteFolder(path);
-                }
-                else
-                {
-                    SecureFileEraser.OverwriteAndDelete(path);
-                }
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                cleanupWarning = $"加密已完成，但清除原始檔案時發生錯誤，請手動確認並刪除原始檔案：{ex.Message}";
-            }
-
-            _history?.Append(new HistoryEntry(uuid, originalName, HistoryAction.Encrypted, DateTimeOffset.UtcNow, hint));
-
-            return new LockResult(true, uuid, markerPath, cleanupWarning);
+            return new EncryptionResult(
+                true, null, uuid, derived.EncryptionKey,
+                Convert.ToBase64String(derived.VerificationHash), Convert.ToBase64String(salt),
+                originalSizeBytes, nestedUuids, tempZipToCleanup);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return new LockResult(false, "", "", $"加密過程發生錯誤：{ex.Message}");
-        }
-        finally
-        {
-            if (tempZipToCleanup is not null)
-            {
-                SecureFileEraser.OverwriteAndDelete(tempZipToCleanup);
-            }
+            return new EncryptionResult(
+                false, $"加密過程發生錯誤：{ex.Message}", null, null, null, null, 0, null, tempZipToCleanup);
         }
     }
 
@@ -223,47 +349,191 @@ public class LockService
             return new UnlockResult(false, "", "找不到對應的加密紀錄");
         }
 
-        string destinationParentDir;
-        if (!string.IsNullOrWhiteSpace(destinationDir))
+        var destinationParentDir = ResolveDestinationParentDir(metadata, destinationDir, out var resolveError);
+        if (destinationParentDir is null)
         {
-            destinationParentDir = destinationDir;
+            return new UnlockResult(false, "", resolveError!);
         }
-        else
-        {
-            var originalParentDir = Path.GetDirectoryName(Path.GetFullPath(metadata.OriginalPath));
-            if (originalParentDir is null)
-            {
-                return new UnlockResult(false, "", "無法判斷原始路徑所在的資料夾");
-            }
-            destinationParentDir = originalParentDir;
-        }
-
-        Directory.CreateDirectory(destinationParentDir);
 
         var result = DecryptAndRestore(metadata, password, destinationParentDir);
 
         if (result.Success)
         {
-            var expectedMarkerPath = ComputeMarkerPath(metadata.OriginalPath, metadata.Type == ItemType.Folder);
-            if (File.Exists(expectedMarkerPath))
-            {
-                var marker = LockedMarkerFile.ReadFrom(expectedMarkerPath);
-                if (marker is not null && marker.Uuid == uuid)
-                {
-                    File.Delete(expectedMarkerPath);
-                }
-                // 若那個位置的 .locked 屬於別的項目（例如同位置後來又加密了別的東西），不動它。
-            }
+            CleanupMarkerIfMatches(metadata, uuid);
         }
 
         return result;
     }
 
     /// <summary>
-    /// DecryptViaMarkerCore 跟 DecryptByUuidCore 共用的核心解密邏輯：驗證密碼、解密內容、寫回目的地、
-    /// 清除 Vault 內的項目、記錄歷史紀錄。兩者的差異只在「怎麼拿到 metadata」跟「目的地資料夾怎麼決定」，
-    /// 所以拆出來共用，避免同一段解密流程要維護兩份。
+    /// 對應規格文件 8.1 節「Passkey 快速解鎖」：不需要密碼，改用 Windows Hello 簽章衍生出的
+    /// 包裝金鑰解開內容金鑰。ownerWindowHandle 用來套用視窗焦點緩解（見 PasskeyProtector.SignChallengeAsync）。
     /// </summary>
+    public async Task<UnlockResult> DecryptByPasskeyAsync(string uuid, IntPtr ownerWindowHandle, string? destinationDir = null)
+    {
+        var metadata = _vault.LoadMetadata(uuid);
+        if (metadata is null)
+        {
+            return new UnlockResult(false, "", "找不到對應的加密紀錄");
+        }
+
+        if (!metadata.PasskeyEnabled || metadata.PasskeyCredentialName is null
+            || metadata.PasskeyChallenge is null || metadata.PasskeyWrappedContentKey is null)
+        {
+            return new UnlockResult(false, "", "這個項目沒有啟用 Passkey 快速解鎖");
+        }
+
+        var challenge = Convert.FromBase64String(metadata.PasskeyChallenge);
+        var signature = await PasskeyProtector.SignChallengeAsync(metadata.PasskeyCredentialName, challenge, ownerWindowHandle);
+        if (signature is null)
+        {
+            return new UnlockResult(false, "", "Passkey 驗證失敗或已取消");
+        }
+
+        byte[] contentKey;
+        try
+        {
+            var wrappingKey = PasskeyProtector.DeriveWrappingKey(signature);
+            try
+            {
+                contentKey = PasskeyProtector.UnwrapContentKey(wrappingKey, metadata.PasskeyWrappedContentKey);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(wrappingKey);
+            }
+        }
+        catch (CryptographicException)
+        {
+            return new UnlockResult(false, "", "Passkey 解包內容金鑰失敗，資料可能已損毀");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(signature);
+        }
+
+        var destinationParentDir = ResolveDestinationParentDir(metadata, destinationDir, out var resolveError);
+        if (destinationParentDir is null)
+        {
+            CryptographicOperations.ZeroMemory(contentKey);
+            return new UnlockResult(false, "", resolveError!);
+        }
+
+        var result = await Task.Run(() => RestoreFromKey(metadata, contentKey, destinationParentDir, "passkey"));
+
+        if (result.Success)
+        {
+            CleanupMarkerIfMatches(metadata, uuid);
+        }
+
+        return result;
+    }
+
+    /// <summary>對應「恢復金鑰」備援路徑：不需要密碼、不需要 Windows Hello，用使用者自己抄下來的恢復金鑰解鎖。</summary>
+    public Task<UnlockResult> DecryptByRecoveryKeyAsync(string uuid, string recoveryKeyInput, string? destinationDir = null)
+        => Task.Run(() => DecryptByRecoveryKeyCore(uuid, recoveryKeyInput, destinationDir));
+
+    private UnlockResult DecryptByRecoveryKeyCore(string uuid, string recoveryKeyInput, string? destinationDir)
+    {
+        var metadata = _vault.LoadMetadata(uuid);
+        if (metadata is null)
+        {
+            return new UnlockResult(false, "", "找不到對應的加密紀錄");
+        }
+
+        if (!metadata.RecoveryKeyEnabled || metadata.RecoveryKeyWrappedContentKey is null)
+        {
+            return new UnlockResult(false, "", "這個項目沒有啟用恢復金鑰");
+        }
+
+        var recoveryKeyBytes = RecoveryKeyProtector.ParseUserInput(recoveryKeyInput);
+        if (recoveryKeyBytes is null)
+        {
+            return new UnlockResult(false, "", "恢復金鑰格式不正確，請確認有沒有打錯或漏掉字元");
+        }
+
+        byte[] contentKey;
+        try
+        {
+            var wrappingKey = RecoveryKeyProtector.DeriveWrappingKey(recoveryKeyBytes);
+            try
+            {
+                contentKey = RecoveryKeyProtector.UnwrapContentKey(wrappingKey, metadata.RecoveryKeyWrappedContentKey);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(wrappingKey);
+            }
+        }
+        catch (CryptographicException)
+        {
+            return new UnlockResult(false, "", "恢復金鑰不正確");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(recoveryKeyBytes);
+        }
+
+        var destinationParentDir = ResolveDestinationParentDir(metadata, destinationDir, out var resolveError);
+        if (destinationParentDir is null)
+        {
+            CryptographicOperations.ZeroMemory(contentKey);
+            return new UnlockResult(false, "", resolveError!);
+        }
+
+        var result = RestoreFromKey(metadata, contentKey, destinationParentDir, "recoveryKey");
+
+        if (result.Success)
+        {
+            CleanupMarkerIfMatches(metadata, uuid);
+        }
+
+        return result;
+    }
+
+    /// <summary>DecryptByUuidCore／DecryptByPasskeyAsync 共用：算出解密後要還原到哪個資料夾。</summary>
+    private static string? ResolveDestinationParentDir(LockedItemMetadata metadata, string? destinationDir, out string? errorMessage)
+    {
+        errorMessage = null;
+
+        if (!string.IsNullOrWhiteSpace(destinationDir))
+        {
+            Directory.CreateDirectory(destinationDir);
+            return destinationDir;
+        }
+
+        var originalParentDir = Path.GetDirectoryName(Path.GetFullPath(metadata.OriginalPath));
+        if (originalParentDir is null)
+        {
+            errorMessage = "無法判斷原始路徑所在的資料夾";
+            return null;
+        }
+
+        Directory.CreateDirectory(originalParentDir);
+        return originalParentDir;
+    }
+
+    /// <summary>
+    /// DecryptByUuidCore／DecryptByPasskeyAsync 共用：解密成功後，反推原本 .locked 應該在的位置，
+    /// 有（而且真的是同一個 UUID）就清掉，避免留下一個已經失效、會誤導使用者的指標檔；沒有就跳過。
+    /// </summary>
+    private void CleanupMarkerIfMatches(LockedItemMetadata metadata, string uuid)
+    {
+        var expectedMarkerPath = ComputeMarkerPath(metadata.OriginalPath, metadata.Type == ItemType.Folder);
+        if (!File.Exists(expectedMarkerPath))
+        {
+            return;
+        }
+
+        var marker = LockedMarkerFile.ReadFrom(expectedMarkerPath);
+        if (marker is not null && marker.Uuid == uuid)
+        {
+            File.Delete(expectedMarkerPath);
+        }
+        // 若那個位置的 .locked 屬於別的項目（例如同位置後來又加密了別的東西），不動它。
+    }
+
+    /// <summary>密碼路徑：驗證密碼、拿到內容金鑰後，交給 RestoreFromKey 做剩下的還原工作。</summary>
     private UnlockResult DecryptAndRestore(LockedItemMetadata metadata, string password, string destinationParentDir)
     {
         var salt = Convert.FromBase64String(metadata.Salt);
@@ -278,6 +548,17 @@ public class LockService
             return new UnlockResult(false, "", "密碼錯誤");
         }
 
+        return RestoreFromKey(metadata, encryptionKey, destinationParentDir, "password");
+    }
+
+    /// <summary>
+    /// DecryptAndRestore（密碼路徑）跟 DecryptByPasskeyAsync／DecryptByRecoveryKeyAsync 共用的核心還原邏輯：
+    /// 拿到內容金鑰之後，解密內容、寫回目的地、清除 Vault 內的項目、記錄歷史紀錄。
+    /// 呼叫端負責把 encryptionKey 準備好（不管是密碼衍生、Passkey 解包，還是恢復金鑰解包出來的），
+    /// 這裡負責用完清零；unlockMethod 只是拿來寫進使用紀錄，不影響解密邏輯本身。
+    /// </summary>
+    private UnlockResult RestoreFromKey(LockedItemMetadata metadata, byte[] encryptionKey, string destinationParentDir, string unlockMethod)
+    {
         var destinationPath = Path.Combine(destinationParentDir, metadata.OriginalName);
 
         if (metadata.Type == ItemType.Folder)
@@ -313,8 +594,8 @@ public class LockService
             }
             catch
             {
-                // 解密中途失敗（密碼錯誤在這裡不會發生，因為上面已經先驗證過；這裡會是內容損毀/被竄改），
-                // 不留下一個寫到一半、內容不完整的檔案在磁碟上誤導使用者。
+                // 解密中途失敗（密碼錯誤/Passkey 解包錯誤在這裡不會發生，因為呼叫端已經先驗證過；
+                // 這裡會是內容損毀/被竄改），不留下一個寫到一半、內容不完整的檔案在磁碟上誤導使用者。
                 if (File.Exists(actualWritePath))
                 {
                     try { File.Delete(actualWritePath); } catch (IOException) { /* 盡力而為，清不掉就算了 */ }
@@ -339,7 +620,9 @@ public class LockService
             }
 
             _vault.DeleteItem(metadata.Uuid);
-            _history?.Append(new HistoryEntry(metadata.Uuid, metadata.OriginalName, HistoryAction.Decrypted, DateTimeOffset.UtcNow, null));
+            _history?.Append(new HistoryEntry(
+                metadata.Uuid, metadata.OriginalName, HistoryAction.Decrypted, DateTimeOffset.UtcNow, null,
+                UnlockMethod: unlockMethod, RestoredPath: destinationPath));
 
             return new UnlockResult(true, destinationPath);
         }
