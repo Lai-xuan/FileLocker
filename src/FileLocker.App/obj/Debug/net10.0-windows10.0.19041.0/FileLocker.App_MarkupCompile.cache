@@ -1,5 +1,5 @@
 ﻿FileLocker.App
-
+1.0.0.0
 
 winexe
 C#
@@ -12,7 +12,7 @@ TRACE;DEBUG;NET;NET10_0;NETCOREAPP;WINDOWS;WINDOWS10_0_19041_0;NET5_0_OR_GREATER
 D:\FileLocker_專案\FileLocker\src\FileLocker.App\App.xaml
 2707225149
 31079308726
-6-1568962296
+8978091269
 214-969285747
 MainWindow.xaml;PasswordPromptWindow.xaml;
 
