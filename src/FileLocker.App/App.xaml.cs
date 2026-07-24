@@ -196,7 +196,10 @@ public partial class App : Application
             {
                 try
                 {
-                    using var server = new NamedPipeServerStream(PipeName, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+                    // PipeOptions.CurrentUserOnly：限制只有目前這個 Windows 使用者能連進這個管道，
+                    // 避免同一台機器上其他登入的使用者（例如透過快速切換使用者、遠端桌面）能連進來
+                    // 塞任意路徑給這個正在跑的 FileLocker 實體。
+                    using var server = new NamedPipeServerStream(PipeName, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
                     await server.WaitForConnectionAsync();
 
                     using var reader = new StreamReader(server, Encoding.UTF8);
@@ -223,7 +226,7 @@ public partial class App : Application
     {
         try
         {
-            using var client = new NamedPipeClientStream(".", PipeName, PipeDirection.Out);
+            using var client = new NamedPipeClientStream(".", PipeName, PipeDirection.Out, PipeOptions.CurrentUserOnly);
             client.Connect(2000); // 2 秒逾時，避免真的連不上時整個行程卡住不結束
 
             using var writer = new StreamWriter(client, Encoding.UTF8);

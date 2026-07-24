@@ -131,6 +131,31 @@ public class VaultManagerTests : IDisposable
     }
 
     [Fact]
+    public void ScanAll_WithGenuineConflict_PrefersMostRecentlyWrittenVersion()
+    {
+        // 對應真正的分歧情境（不是單純重複副本）：兩台裝置各自對同一個項目做了不同修改，
+        // 例如一邊開了 Passkey、一邊沒開。ScanAll 應該偏好保留寫入時間比較新的那份。
+        var uuid = Guid.NewGuid().ToString();
+
+        var olderVersion = CreateSampleMetadata(uuid);
+        olderVersion.Hint = "舊裝置的提示";
+        var olderPath = Path.Combine(_tempVaultDir.FullName, $"{uuid}.meta.json");
+        File.WriteAllText(olderPath, System.Text.Json.JsonSerializer.Serialize(olderVersion));
+        File.SetLastWriteTimeUtc(olderPath, DateTime.UtcNow.AddMinutes(-10));
+
+        var newerVersion = CreateSampleMetadata(uuid);
+        newerVersion.Hint = "新裝置的提示，應該是這份被留下來";
+        var newerPath = Path.Combine(_tempVaultDir.FullName, $"{uuid}-另一台裝置.meta.json");
+        File.WriteAllText(newerPath, System.Text.Json.JsonSerializer.Serialize(newerVersion));
+        File.SetLastWriteTimeUtc(newerPath, DateTime.UtcNow);
+
+        var results = _vault.ScanAll().Where(m => m.Uuid == uuid).ToList();
+
+        Assert.Single(results);
+        Assert.Equal("新裝置的提示，應該是這份被留下來", results[0].Hint);
+    }
+
+    [Fact]
     public void DeleteItem_RemovesEncAndMetaFiles()
     {
         var uuid = Guid.NewGuid().ToString();

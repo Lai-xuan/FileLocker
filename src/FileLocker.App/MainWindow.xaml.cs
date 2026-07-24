@@ -99,6 +99,21 @@ public partial class MainWindow : Window
             // CoreWebView2HostResourceAccessKind.Deny：不允許其他來源透過網路請求存取這個
             // 虛擬主機底下的資源，我們自己只會直接導覽過去，不需要開放跨來源存取。
             var webAppFolder = Path.Combine(AppContext.BaseDirectory, "webapp");
+            if (!File.Exists(Path.Combine(webAppFolder, "index.html")))
+            {
+                // 找不到打包好的前端靜態檔案——通常代表建置流程沒跑過 npm run build，
+                // 或是輸出目錄結構跟預期不一樣。與其讓畫面就這樣一片空白讓使用者一頭霧水，
+                // 直接跳出明確的錯誤訊息，方便排查。
+                MessageBox.Show(
+                    $"找不到前端畫面檔案（預期位置：{webAppFolder}）。\n\n" +
+                    "如果是開發階段自己編譯的 Release 版本，請確認 FileLocker.App.csproj 的建置流程有" +
+                    "成功執行 npm run build，並把輸出複製到這個資料夾。",
+                    "FileLocker",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+                return;
+            }
+
             MainWebView.CoreWebView2.SetVirtualHostNameToFolderMapping(
                 AppOrigin, webAppFolder, CoreWebView2HostResourceAccessKind.Deny);
             MainWebView.CoreWebView2.Navigate($"https://{AppOrigin}/index.html");

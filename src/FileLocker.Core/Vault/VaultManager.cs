@@ -87,9 +87,11 @@ public class VaultManager
     ///
     /// 對應雲端同步情境測試（2026-07-24）：這裡刻意用檔案「內容」裡的 UUID 判斷是否重複，
     /// 不是用檔名——雲端同步用戶端偵測到衝突時，常見做法是另外存一份帶著裝置名稱的「衝突副本」
-    /// 檔案（檔名不同，內容其實是同一筆資料的重複），如果不特別處理，這種副本會讓同一個項目
-    /// 在清單頁出現兩次。這裡用 HashSet 追蹤看過的 UUID，同一個 UUID 只回傳第一次看到的那份，
-    /// 後續重複的（不管來自哪個檔名）都跳過不回傳。
+    /// 檔案（檔名不同）。單純的重複副本內容通常完全一樣，回傳哪一份都無所謂；但如果是真正的
+    /// 分歧（兩台裝置各自對同一個項目做了不同修改，例如一邊開了 Passkey 一邊沒開），
+    /// 就要有個判斷依據決定回傳哪一份——這裡用檔案的最後寫入時間，同一個 UUID 只回傳
+    /// 寫入時間最新的那份，比單純「哪個先被列舉到就用哪個」更合理，至少行為是決定性的、
+    /// 偏好保留較新的變更。
     /// </summary>
     public IEnumerable<LockedItemMetadata> ScanAll()
     {
@@ -98,29 +100,43 @@ public class VaultManager
             yield break;
         }
 
-        var seenUuids = new HashSet<string>();
+        var byUuid = new Dictionary<string, (LockedItemMetadata Metadata, DateTime LastWriteUtc)>();
 
         foreach (var metaFilePath in Directory.EnumerateFiles(VaultPath, "*.meta.json"))
         {
-            LockedItemMetadata? metadata = null;
+            LockedItemMetadata? metadata;
+            DateTime lastWriteUtc;
             try
             {
                 var json = File.ReadAllText(metaFilePath);
                 metadata = JsonSerializer.Deserialize<LockedItemMetadata>(json);
+                lastWriteUtc = File.GetLastWriteTimeUtc(metaFilePath);
             }
             catch (JsonException)
             {
                 // 略過損毀的單一項目，繼續掃描其他項目。
+                continue;
             }
             catch (IOException)
             {
                 // 例如檔案正被雲端同步用戶端鎖定寫入中，略過這次掃描，下次刷新再讀一次即可。
+                continue;
             }
 
-            if (metadata is not null && seenUuids.Add(metadata.Uuid))
+            if (metadata is null)
             {
-                yield return metadata;
+                continue;
             }
+
+            if (!byUuid.TryGetValue(metadata.Uuid, out var existing) || lastWriteUtc > existing.LastWriteUtc)
+            {
+                byUuid[metadata.Uuid] = (metadata, lastWriteUtc);
+            }
+        }
+
+        foreach (var entry in byUuid.Values)
+        {
+            yield return entry.Metadata;
         }
     }
 
