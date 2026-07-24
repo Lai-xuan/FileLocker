@@ -80,7 +80,23 @@ public partial class App : Application
 
         StartPipeServerListener();
 
+        // 檢查／需要的話自動註冊 Shell Extension（見 ShellExtensionRegistrar 說明）。
+        // 全新安裝、或應用程式資料夾被搬移過之後，這裡會真的執行註冊動作並回傳 true，
+        // 這種情況要提示使用者重啟 Explorer，右鍵選單才會出現新登錄的項目
+        // （Explorer 對 Shell Extension 有自己的快取，不會即時反映登錄檔變化）。
+        var justRegisteredShellExtension = ShellExtensionRegistrar.EnsureRegistered();
+
         HandleLaunchArgs(e.Args);
+
+        if (justRegisteredShellExtension)
+        {
+            MessageBox.Show(
+                "已完成右鍵選單設定。需要重新啟動 Windows 檔案總管，右鍵選單裡才會出現「使用 FileLocker 加密」的選項——" +
+                "可以到工作管理員裡找到「Windows 檔案總管」，按右鍵選「重新啟動」，或登出再登入也可以。",
+                "FileLocker",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
     }
 
     protected override void OnExit(ExitEventArgs e)

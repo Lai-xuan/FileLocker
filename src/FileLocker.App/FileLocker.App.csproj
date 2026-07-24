@@ -36,4 +36,18 @@
     <Copy SourceFiles="@(WebAppFiles)" DestinationFolder="$(OutDir)webapp\%(RecursiveDir)" SkipUnchangedFiles="true" />
   </Target>
 
+  <!--
+    Shell Extension 是獨立的 C++ 專案，用 cl.exe 手動編譯（見規格文件第 5.2 節），不屬於這個
+    .NET 建置圖，MSBuild 不會自動幫忙編譯它。這裡只負責「如果那邊已經手動編出 DLL了，
+    就複製一份放到跟 FileLocker.App.exe 同一個資料夾」——ShellExtensionRegistrar 靠這個
+    同資料夾的檔案才能自動完成登錄，不管 Debug 還是 Release 建置都需要這份複製。
+    找不到來源 DLL（例如還沒手動編譯過）不會讓建置失敗，單純跳過這個步驟。
+  -->
+  <Target Name="CopyShellExtensionDll" AfterTargets="Build">
+    <ItemGroup>
+      <ShellExtensionDll Include="..\FileLocker.ShellExtension\FileLockerShellExtension.dll" Condition="Exists('..\FileLocker.ShellExtension\FileLockerShellExtension.dll')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(ShellExtensionDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="'@(ShellExtensionDll)' != ''" />
+  </Target>
+
 </Project>

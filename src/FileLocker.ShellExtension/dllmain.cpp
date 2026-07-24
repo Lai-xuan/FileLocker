@@ -21,12 +21,6 @@ static LONG g_cDllRef = 0;
 static HMODULE g_hModule = nullptr;
 
 /// <summary>
-/// 找 FileLocker.App.exe 在哪裡：先試跟這個 Shell Extension DLL 放在同一個資料夾
-/// （正式安裝後 installer 會把兩者放一起，這是最終會用到的路徑）；
-/// 找不到就退回開發階段的暫時路徑，直接指向 dotnet build 產生的執行檔位置——
-/// 等安裝程式做好之後，這裡要改成從安裝程式寫入的登錄檔讀取真正的安裝路徑。
-/// </summary>
-/// <summary>
 /// 正確處理 Windows 命令列參數的引號逃脫，比照微軟官方文件的標準演算法——
 /// 單純用「路徑前後各包一個雙引號」在路徑結尾剛好是奇數個反斜線時會出錯（那個反斜線會
 /// 逃脫掉我們補上去的關閉引號，導致這個參數沒有真的結束、後面的參數解析全部跟著錯亂）。
@@ -66,6 +60,13 @@ static std::wstring QuoteArgument(const std::wstring& argument)
     return result;
 }
 
+/// <summary>
+/// 找 FileLocker.App.exe 在哪裡：先試跟這個 Shell Extension DLL 放在同一個資料夾——
+/// 正式安裝後兩者會被安裝程式放在同一個「應用程式內容資料夾」裡（見規格文件第 5.2、13 節），
+/// 這個檢查在正式版就是唯一會用到的路徑，不需要再讀任何登錄檔。
+/// 找不到才退回開發階段的暫時路徑，直接指向 dotnet build 產生的執行檔位置，方便還沒打包安裝檔
+/// 之前用 dev build 測試。
+/// </summary>
 static std::wstring GetFileLockerAppPath()
 {
     wchar_t modulePath[MAX_PATH];
@@ -395,6 +396,12 @@ STDAPI DllCanUnloadNow()
 }
 
 // ---- 註冊／解除註冊：CLSID 本身 + *\shellex\ContextMenuHandlers\FileLocker 這個掛勾兩個都要寫 ----
+//
+// 特意寫進 HKEY_CURRENT_USER\Software\Classes，不是 HKEY_CLASSES_ROOT——這是 Windows 官方支援
+// 的每個使用者各自登錄的機制，Explorer 會自動把它併進當前使用者看到的 HKEY_CLASSES_ROOT
+// 合併視圖裡，效果完全一樣，但不需要系統管理員權限。這樣一來，正式版可以讓 FileLocker.App
+// 自己在啟動時檢查、需要的話就自己註冊（見 FileLocker.App 裡的 ShellExtensionRegistrar），
+// 不需要安裝程式知道任何 COM 相關的事；開發階段用 regsvr32 手動測試也不用再開系統管理員權限。
 
 STDAPI DllRegisterServer()
 {
@@ -407,12 +414,12 @@ STDAPI DllRegisterServer()
     wchar_t clsidStr[64];
     StringFromGUID2(CLSID_FileLockerShellExtension, clsidStr, ARRAYSIZE(clsidStr));
 
-    // 1. CLSID\{...}\InprocServer32 = 這個 DLL 的路徑
-    wchar_t clsidKeyPath[128];
-    StringCchPrintfW(clsidKeyPath, ARRAYSIZE(clsidKeyPath), L"CLSID\\%s\\InprocServer32", clsidStr);
+    // 1. Software\Classes\CLSID\{...}\InprocServer32 = 這個 DLL 的路徑
+    wchar_t clsidKeyPath[160];
+    StringCchPrintfW(clsidKeyPath, ARRAYSIZE(clsidKeyPath), L"Software\\Classes\\CLSID\\%s\\InprocServer32", clsidStr);
 
     HKEY hKeyClsid;
-    LSTATUS status = RegCreateKeyExW(HKEY_CLASSES_ROOT, clsidKeyPath, 0, nullptr, 0, KEY_WRITE, nullptr, &hKeyClsid, nullptr);
+    LSTATUS status = RegCreateKeyExW(HKEY_CURRENT_USER, clsidKeyPath, 0, nullptr, 0, KEY_WRITE, nullptr, &hKeyClsid, nullptr);
     if (status != ERROR_SUCCESS)
     {
         return HRESULT_FROM_WIN32(status);
@@ -421,9 +428,9 @@ STDAPI DllRegisterServer()
     RegSetValueExW(hKeyClsid, L"ThreadingModel", 0, REG_SZ, (const BYTE*)L"Apartment", (DWORD)((wcslen(L"Apartment") + 1) * sizeof(wchar_t)));
     RegCloseKey(hKeyClsid);
 
-    // 2. *\shellex\ContextMenuHandlers\FileLocker = CLSID 字串——這行才是真正「掛」到右鍵選單上的關鍵。
+    // 2. Software\Classes\*\shellex\ContextMenuHandlers\FileLocker = CLSID 字串——這行才是真正「掛」到右鍵選單上的關鍵。
     HKEY hKeyHandler;
-    status = RegCreateKeyExW(HKEY_CLASSES_ROOT, L"*\\shellex\\ContextMenuHandlers\\FileLocker", 0, nullptr, 0, KEY_WRITE, nullptr, &hKeyHandler, nullptr);
+    status = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\*\\shellex\\ContextMenuHandlers\\FileLocker", 0, nullptr, 0, KEY_WRITE, nullptr, &hKeyHandler, nullptr);
     if (status != ERROR_SUCCESS)
     {
         return HRESULT_FROM_WIN32(status);
@@ -439,11 +446,11 @@ STDAPI DllUnregisterServer()
     wchar_t clsidStr[64];
     StringFromGUID2(CLSID_FileLockerShellExtension, clsidStr, ARRAYSIZE(clsidStr));
 
-    wchar_t clsidKeyPath[128];
-    StringCchPrintfW(clsidKeyPath, ARRAYSIZE(clsidKeyPath), L"CLSID\\%s", clsidStr);
-    RegDeleteTreeW(HKEY_CLASSES_ROOT, clsidKeyPath);
+    wchar_t clsidKeyPath[160];
+    StringCchPrintfW(clsidKeyPath, ARRAYSIZE(clsidKeyPath), L"Software\\Classes\\CLSID\\%s", clsidStr);
+    RegDeleteTreeW(HKEY_CURRENT_USER, clsidKeyPath);
 
-    RegDeleteTreeW(HKEY_CLASSES_ROOT, L"*\\shellex\\ContextMenuHandlers\\FileLocker");
+    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\*\\shellex\\ContextMenuHandlers\\FileLocker");
 
     return S_OK;
 }
