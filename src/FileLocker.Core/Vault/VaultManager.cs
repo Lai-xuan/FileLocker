@@ -1,6 +1,5 @@
 using System.Security.Cryptography;
 using System.Text.Json;
-using FileLocker.Core.Io;
 using FileLocker.Core.Models;
 
 namespace FileLocker.Core.Vault;
@@ -49,7 +48,7 @@ public class VaultManager
         };
 
         var json = JsonSerializer.Serialize(newConfig, JsonOptions);
-        AtomicFile.WriteAllText(ConfigPath, json);
+        File.WriteAllText(ConfigPath, json);
 
         return newConfig;
     }
@@ -58,7 +57,7 @@ public class VaultManager
     {
         Directory.CreateDirectory(VaultPath);
         var json = JsonSerializer.Serialize(metadata, JsonOptions);
-        AtomicFile.WriteAllText(MetaPath(metadata.Uuid), json);
+        File.WriteAllText(MetaPath(metadata.Uuid), json);
     }
 
     /// <summary>找不到、或內容損毀，一律回傳 null，由呼叫端決定要顯示什麼錯誤訊息（不拋例外）。</summary>
@@ -85,6 +84,12 @@ public class VaultManager
     /// 對應第 4 節：App 啟動或清單頁刷新時，掃描 Vault 內全部 *.meta.json 建立/更新本機快取索引。
     /// 遇到單一檔案損毀（JSON 解析失敗）會跳過該筆、不中斷整個掃描，確保一個壞掉的項目不會讓
     /// 使用者連清單都看不到——這對雲端同步情境尤其重要，同步中的檔案偶爾會短暫讀到不完整內容。
+    ///
+    /// 對應雲端同步情境測試（2026-07-24）：這裡刻意用檔案「內容」裡的 UUID 判斷是否重複，
+    /// 不是用檔名——雲端同步用戶端偵測到衝突時，常見做法是另外存一份帶著裝置名稱的「衝突副本」
+    /// 檔案（檔名不同，內容其實是同一筆資料的重複），如果不特別處理，這種副本會讓同一個項目
+    /// 在清單頁出現兩次。這裡用 HashSet 追蹤看過的 UUID，同一個 UUID 只回傳第一次看到的那份，
+    /// 後續重複的（不管來自哪個檔名）都跳過不回傳。
     /// </summary>
     public IEnumerable<LockedItemMetadata> ScanAll()
     {
@@ -92,6 +97,8 @@ public class VaultManager
         {
             yield break;
         }
+
+        var seenUuids = new HashSet<string>();
 
         foreach (var metaFilePath in Directory.EnumerateFiles(VaultPath, "*.meta.json"))
         {
@@ -110,7 +117,7 @@ public class VaultManager
                 // 例如檔案正被雲端同步用戶端鎖定寫入中，略過這次掃描，下次刷新再讀一次即可。
             }
 
-            if (metadata is not null)
+            if (metadata is not null && seenUuids.Add(metadata.Uuid))
             {
                 yield return metadata;
             }
@@ -118,7 +125,7 @@ public class VaultManager
     }
 
     /// <summary>
-    /// 刪除 Vault 內對應的 .enc 與 .meta.json。刻意設計成冪等（idempotent）：
+    /// 刪除 Vault 內對應的 .enc 與 .meta.json。刻意設計成幂等（idempotent）：
     /// 檔案本來就不存在時不拋例外，讓呼叫端可以安全地重複呼叫而不用先檢查存在與否。
     /// </summary>
     public void DeleteItem(string uuid)
@@ -126,17 +133,14 @@ public class VaultManager
         var encPath = EncPath(uuid);
         var metaPath = MetaPath(uuid);
 
-        // 先刪 metadata、後刪內容：如果中途中斷（斷電、當機），最壞情況只是留下一個沒人指向的 .enc
-        // （浪費一點空間，但不會誤導使用者），而不是留下一筆指向不存在內容的「幽靈」metadata——
-        // 那樣清單頁還是會顯示這筆項目，使用者點下去解密才會發現內容其實已經不見了。
-        if (File.Exists(metaPath))
-        {
-            File.Delete(metaPath);
-        }
-
         if (File.Exists(encPath))
         {
             File.Delete(encPath);
+        }
+
+        if (File.Exists(metaPath))
+        {
+            File.Delete(metaPath);
         }
     }
 

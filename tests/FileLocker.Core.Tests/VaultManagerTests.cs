@@ -51,8 +51,6 @@ public class VaultManagerTests : IDisposable
     [Fact]
     public void LoadOrCreateConfig_CalledTwice_ReturnsSameKeyBothTimes()
     {
-        // 對應規格文件第 6 節：多裝置共用同一個 Vault 時，簽章金鑰必須是固定的同一把，
-        // 不能每次啟動或每個裝置各自產生新的一把，否則指標檔驗證會全部失敗。
         var first = _vault.LoadOrCreateConfig();
         var second = _vault.LoadOrCreateConfig();
 
@@ -111,6 +109,25 @@ public class VaultManagerTests : IDisposable
 
         Assert.Single(results);
         Assert.Equal(validUuid, results[0].Uuid);
+    }
+
+    [Fact]
+    public void ScanAll_WithSyncConflictCopy_ReturnsOnlyOneEntryPerUuid()
+    {
+        // 對應雲端同步情境測試：模擬 OneDrive/Dropbox 之類的同步用戶端偵測到衝突時，
+        // 另外存一份帶著裝置名稱的「衝突副本」——檔名不同，內容其實是同一筆資料的重複。
+        var uuid = Guid.NewGuid().ToString();
+        var metadata = CreateSampleMetadata(uuid);
+        _vault.SaveMetadata(metadata); // 存成 {uuid}.meta.json
+
+        var conflictCopyPath = Path.Combine(_tempVaultDir.FullName, $"{uuid}-我的電腦.meta.json");
+        var json = System.Text.Json.JsonSerializer.Serialize(metadata);
+        File.WriteAllText(conflictCopyPath, json);
+
+        var results = _vault.ScanAll().Where(m => m.Uuid == uuid).ToList();
+
+        // 就算實際上有兩個檔案對應同一個 UUID，清單也只應該看到一筆，不能讓使用者看到重複列。
+        Assert.Single(results);
     }
 
     [Fact]

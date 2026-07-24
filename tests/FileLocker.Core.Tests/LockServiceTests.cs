@@ -560,4 +560,96 @@ public class LockServiceTests : IDisposable
         Assert.False(File.Exists(lockResult.LockedMarkerPath)); // 失效的指標檔應該一併被清掉
         Assert.Null(new VaultManager(_vaultDir.FullName).LoadMetadata(lockResult.Uuid));
     }
+
+    // ---- 對應雲端同步情境測試（2026-07-24）----
+    // 這幾個測試不牽涉真的雲端帳號，而是模擬 FileLocker 自己能控制、也真正該負責的部分：
+    // 「Vault 被某種外部機制（同步用戶端）不受控地搬移/同時存取時，程式不能崩潰或算錯」。
+    // 真的跨裝置同步（上傳下載本身）是 OneDrive/Dropbox 的事，不是這裡要驗證的範圍。
+
+    [Fact]
+    public async Task Vault_CopiedToNewLocation_CanStillDecryptWithNewVaultManagerInstance()
+    {
+        // 模擬「同步到另一台裝置」最貼近的本機替代測試法：把整個 Vault 資料夾原封不動搬到
+        // 別的路徑，用全新的 VaultManager／LockService 開啟，確認密碼還是能正常解密——
+        // 這驗證了 Vault「輕便可攜」這個核心設計目標，不依賴任何機器綁定的狀態。
+        var filePath = Path.Combine(_workDir.FullName, "可攜測試.txt");
+        File.WriteAllText(filePath, "這份內容要能在另一個 Vault 位置正常解密");
+        await _service.EncryptAsync(filePath, "correct-password", null);
+
+        var copiedVaultDir = Directory.CreateTempSubdirectory("FileLockerCopiedVault_");
+        try
+        {
+            CopyDirectory(_vaultDir.FullName, copiedVaultDir.FullName);
+
+            var newVaultManager = new VaultManager(copiedVaultDir.FullName);
+            var newService = new LockService(newVaultManager);
+
+            var items = newVaultManager.ScanAll().ToList();
+            Assert.Single(items);
+
+            var restoreDir = Directory.CreateTempSubdirectory("FileLockerCopiedVaultRestore_");
+            try
+            {
+                var result = await newService.DecryptByUuidAsync(items[0].Uuid, "correct-password", restoreDir.FullName);
+
+                Assert.True(result.Success);
+                Assert.Equal("這份內容要能在另一個 Vault 位置正常解密", File.ReadAllText(Path.Combine(restoreDir.FullName, "可攜測試.txt")));
+            }
+            finally
+            {
+                restoreDir.Delete(recursive: true);
+            }
+        }
+        finally
+        {
+            copiedVaultDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TwoInstancesPointingAtSameVault_ConcurrentDecryptOfSameItem_DoesNotThrowOrCorruptState()
+    {
+        // 模擬兩台裝置幾乎同時對同一個 UUID 做操作（例如兩台電腦都在使用者離開電腦時自動同步、
+        // 剛好都嘗試解密同一筆）。不保證兩邊都成功（畢竟只有一份內容可以被解密+刪除一次），
+        // 但至少不能讓其中一邊丟出沒接住的例外、或讓 Vault 留下損毀的中間狀態。
+        var filePath = Path.Combine(_workDir.FullName, "併發測試.txt");
+        File.WriteAllText(filePath, "併發測試內容");
+        var lockResult = await _service.EncryptAsync(filePath, "correct-password", null);
+
+        var vaultManagerA = new VaultManager(_vaultDir.FullName);
+        var vaultManagerB = new VaultManager(_vaultDir.FullName);
+        var serviceA = new LockService(vaultManagerA);
+        var serviceB = new LockService(vaultManagerB);
+
+        var restoreDirA = Directory.CreateTempSubdirectory("FileLockerConcurrentA_");
+        var restoreDirB = Directory.CreateTempSubdirectory("FileLockerConcurrentB_");
+        try
+        {
+            var exception = await Record.ExceptionAsync(async () =>
+            {
+                var taskA = serviceA.DecryptByUuidAsync(lockResult.Uuid, "correct-password", restoreDirA.FullName);
+                var taskB = serviceB.DecryptByUuidAsync(lockResult.Uuid, "correct-password", restoreDirB.FullName);
+                await Task.WhenAll(taskA, taskB);
+            });
+
+            Assert.Null(exception); // 重點：不管誰贏，都不該有沒接住的例外跑出來
+
+            // Vault 裡的項目最終應該已經被清掉（不管是哪一邊贏的），不會卡在半殘狀態。
+            var remainingItems = new VaultManager(_vaultDir.FullName).ScanAll().ToList();
+            Assert.Empty(remainingItems);
+        }
+        finally
+        {
+            restoreDirA.Delete(recursive: true);
+            restoreDirB.Delete(recursive: true);
+        }
+    }
+
+    private static void CopyDirectory(string sourceDir, string destinationDir)
+    {
+        foreach (var filePath in Directory.GetFiles(sourceDir))
+        {
+            File.Copy(filePath, Path.Combine(destinationDir, Path.GetFileName(filePath)));
+        }
+    }
 }
