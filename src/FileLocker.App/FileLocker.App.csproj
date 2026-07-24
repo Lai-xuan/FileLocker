@@ -16,4 +16,24 @@
     <UseWPF>true</UseWPF>
   </PropertyGroup>
 
+  <!--
+    只有 Release 建置才需要打包前端靜態檔案——Debug 建置照舊連到 Vite 開發伺服器
+    （見 MainWindow.xaml.cs 裡的 #if DEBUG 分支），不需要每次 Debug 建置都重跑一次
+    npm run build，開發起來才不會變慢。
+
+    這兩個 Target 依序執行：先在 FileLocker.Web 資料夾跑 npm run build 產生 dist/，
+    再把 dist/ 底下所有檔案複製進這個專案的輸出目錄下的 webapp/ 資料夾——
+    正式執行時 MainWindow 會用 SetVirtualHostNameToFolderMapping 指向這個 webapp 資料夾。
+  -->
+  <Target Name="BuildWebFrontend" BeforeTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <Exec Command="npm run build" WorkingDirectory="..\FileLocker.Web" />
+  </Target>
+
+  <Target Name="CopyWebAppForRelease" AfterTargets="BuildWebFrontend" Condition="'$(Configuration)' == 'Release'">
+    <ItemGroup>
+      <WebAppFiles Include="..\FileLocker.Web\dist\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(WebAppFiles)" DestinationFolder="$(OutDir)webapp\%(RecursiveDir)" SkipUnchangedFiles="true" />
+  </Target>
+
 </Project>

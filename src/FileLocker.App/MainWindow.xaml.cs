@@ -6,11 +6,16 @@ using FileLocker.Core;
 using FileLocker.Core.History;
 using FileLocker.Core.Settings;
 using FileLocker.Core.Vault;
+using Microsoft.Web.WebView2.Core;
 
 namespace FileLocker.App;
 
 public partial class MainWindow : Window
 {
+    // Release 建置時 SetVirtualHostNameToFolderMapping 用的虛擬主機名稱，純粹是本機識別用，
+    // 不是真的網域，不需要真的擁有或註冊這個名稱。
+    private const string AppOrigin = "filelocker.local";
+
     private readonly VaultManager _vaultManager;
     private readonly HistoryLogger _historyLogger;
     private readonly LockService _lockService;
@@ -47,12 +52,15 @@ public partial class MainWindow : Window
             // WebView2 安全性硬化：
             // 1. 關掉密碼自動儲存/自動填入——不關的話，使用者在加密/解密表單輸入的密碼可能被
             //    Chromium 內建的密碼管理員另外存一份，離開我們自己的掌控範圍，也弱化了「密碼不會被
-            //    存在任何地方」的安全宣稱。
-            // 2. 關掉 DevTools——避免任何能操作這個視窗的人直接開開發人員工具，檢視/竄改頁面狀態，
-            //    或直接呼叫 postMessage 橋接繞過正常的操作流程。
+            //    存在任何地方」的安全宣稱。這個不管 Debug/Release 都要關。
+            // 2. DevTools 只有 Release 建置才關掉——Debug 建置留著方便自己開發時除錯前端問題。
             MainWebView.CoreWebView2.Settings.IsPasswordAutosaveEnabled = false;
             MainWebView.CoreWebView2.Settings.IsGeneralAutofillEnabled = false;
+#if DEBUG
+            MainWebView.CoreWebView2.Settings.AreDevToolsEnabled = true;
+#else
             MainWebView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+#endif
 
             // 右鍵選單：只有點在可編輯欄位（密碼／恢復金鑰輸入框）上才保留瀏覽器預設的剪下/複製/貼上選單，
             // 其餘一律不顯示——原本 Chromium 內建的右鍵選單會有「上一頁」「重新整理」「檢視原始碼」
@@ -65,20 +73,36 @@ public partial class MainWindow : Window
                 }
             };
 
-            // 目前開發階段載入的是本機 Vite 開發伺服器（http://localhost:5173），正式發布前必須
-            // 改成從封裝好的靜態檔案載入（見規格文件第 9 節），不能讓這個網址原封不動出貨——
-            // 這裡先加一層防禦性的導覽限制：只要嘗試導覽到不是我們預期的網址就直接擋下來，
-            // 避免本機同一個埠被其他程式搶先佔用時，載入到惡意頁面、透過 postMessage 橋接
-            // 取得跟我們自己前端一樣的權限去操控後端。
+            // 導覽限制：只允許導覽到我們預期的網址，其餘一律擋下——避免 Debug 模式下本機
+            // localhost 埠被其他程式搶先佔用時載入到惡意頁面；Release 模式下也是防禦性寫法，
+            // 就算未來哪個環節不小心觸發了非預期的導覽，也不會真的跑到別的地方去。
             MainWebView.CoreWebView2.NavigationStarting += (_, navArgs) =>
             {
-                if (!navArgs.Uri.StartsWith("http://localhost:5173/", StringComparison.Ordinal))
+#if DEBUG
+                var isAllowed = navArgs.Uri.StartsWith("http://localhost:5173/", StringComparison.Ordinal);
+#else
+                var isAllowed = navArgs.Uri.StartsWith($"https://{AppOrigin}/", StringComparison.Ordinal);
+#endif
+                if (!isAllowed)
                 {
                     navArgs.Cancel = true;
                 }
             };
 
+#if DEBUG
+            // Debug 建置：連到 Vite 開發伺服器，需要另外開一個終端機跑 npm run dev。
             MainWebView.CoreWebView2.Navigate("http://localhost:5173/");
+#else
+            // Release 建置：直接從封裝好的靜態檔案載入，不透過任何本機網路埠——
+            // 這是規格文件 8.3 節記錄的硬性阻擋項目的正式修法。webapp 資料夾由
+            // FileLocker.App.csproj 的 Release 建置流程自動產生（npm run build + 複製檔案）。
+            // CoreWebView2HostResourceAccessKind.Deny：不允許其他來源透過網路請求存取這個
+            // 虛擬主機底下的資源，我們自己只會直接導覽過去，不需要開放跨來源存取。
+            var webAppFolder = Path.Combine(AppContext.BaseDirectory, "webapp");
+            MainWebView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+                AppOrigin, webAppFolder, CoreWebView2HostResourceAccessKind.Deny);
+            MainWebView.CoreWebView2.Navigate($"https://{AppOrigin}/index.html");
+#endif
             MainWebView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
             MainWebView.CoreWebView2.NavigationCompleted += (_, args) =>
             {
