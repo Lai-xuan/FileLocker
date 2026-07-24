@@ -47,7 +47,7 @@ public class LockService
 
         if (!isFolder && !isFile)
         {
-            return new LockResult(false, "", "", $"找不到檔案或資料夾：{path}");
+            return new LockResult(false, "", "", $"找不到檔案或資料夾：{path}", ErrorCode: ErrorCodes.SourceNotFound, ErrorDetail: path);
         }
 
         var type = isFolder ? ItemType.Folder : ItemType.File;
@@ -61,7 +61,7 @@ public class LockService
         var markerPath = ComputeMarkerPath(path, isFolder);
         if (File.Exists(markerPath))
         {
-            return new LockResult(false, "", "", $"目標位置已經有一個指標檔了：{markerPath}");
+            return new LockResult(false, "", "", $"目標位置已經有一個指標檔了：{markerPath}", ErrorCode: ErrorCodes.MarkerAlreadyExists, ErrorDetail: markerPath);
         }
 
         EncryptionResult encryptResult;
@@ -71,20 +71,20 @@ public class LockService
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return new LockResult(false, "", "", $"加密過程發生錯誤：{ex.Message}");
+            return new LockResult(false, "", "", $"加密過程發生錯誤：{ex.Message}", ErrorCode: ErrorCodes.EncryptError, ErrorDetail: ex.Message);
         }
         catch (Exception ex)
         {
             // EncryptToVault 內部已經自己接住所有例外，理論上這裡不會再丟出來——
             // 保留這層純粹是防禦性寫法，避免未來改動時漏接某個例外型別導致整個 App 崩潰。
-            return new LockResult(false, "", "", $"加密過程發生未預期的錯誤：{ex.Message}");
+            return new LockResult(false, "", "", $"加密過程發生未預期的錯誤：{ex.Message}", ErrorCode: ErrorCodes.EncryptUnexpectedError, ErrorDetail: ex.Message);
         }
 
         try
         {
             if (!encryptResult.Success)
             {
-                return new LockResult(false, "", "", encryptResult.ErrorMessage);
+                return new LockResult(false, "", "", encryptResult.ErrorMessage, ErrorCode: encryptResult.ErrorCode, ErrorDetail: encryptResult.ErrorDetail);
             }
 
             string? passkeyCredentialName = null;
@@ -220,12 +220,12 @@ public class LockService
             // 之前可能已經成功把 metadata 寫進 Vault 了——盡力把這個孤兒項目清掉，避免清單頁出現一筆
             // 沒有對應 .locked 指標檔、永遠打不開的幽靈紀錄。
             TryCleanupOrphanedVaultEntry(encryptResult.Uuid);
-            return new LockResult(false, "", "", $"加密過程發生錯誤：{ex.Message}");
+            return new LockResult(false, "", "", $"加密過程發生錯誤：{ex.Message}", ErrorCode: ErrorCodes.EncryptError, ErrorDetail: ex.Message);
         }
         catch (Exception ex)
         {
             TryCleanupOrphanedVaultEntry(encryptResult.Uuid);
-            return new LockResult(false, "", "", $"加密過程發生未預期的錯誤：{ex.Message}");
+            return new LockResult(false, "", "", $"加密過程發生未預期的錯誤：{ex.Message}", ErrorCode: ErrorCodes.EncryptUnexpectedError, ErrorDetail: ex.Message);
         }
         finally
         {
@@ -265,7 +265,9 @@ public class LockService
         string? SaltBase64,
         long OriginalSizeBytes,
         List<string>? NestedUuids,
-        string? TempZipPath);
+        string? TempZipPath,
+        string? ErrorCode = null,
+        string? ErrorDetail = null);
 
     /// <summary>
     /// 純粹的檔案 I/O／加密運算部分，不牽涉任何 Windows Hello / WinRT 呼叫，安全地丟進背景執行緒執行。
@@ -321,14 +323,16 @@ public class LockService
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return new EncryptionResult(
-                false, $"加密過程發生錯誤：{ex.Message}", null, null, null, null, 0, null, tempZipToCleanup);
+                false, $"加密過程發生錯誤：{ex.Message}", null, null, null, null, 0, null, tempZipToCleanup,
+                ErrorCode: ErrorCodes.EncryptError, ErrorDetail: ex.Message);
         }
         catch (Exception ex)
         {
             // 兜底：任何沒特別預期到的例外（例如底層密碼學函式庫丟出的例外）都不應該讓整個 App 崩潰，
             // 一律轉換成失敗結果回傳，讓 GUI 能顯示錯誤訊息而不是整個程式當掉。
             return new EncryptionResult(
-                false, $"加密過程發生未預期的錯誤：{ex.Message}", null, null, null, null, 0, null, tempZipToCleanup);
+                false, $"加密過程發生未預期的錯誤：{ex.Message}", null, null, null, null, 0, null, tempZipToCleanup,
+                ErrorCode: ErrorCodes.EncryptUnexpectedError, ErrorDetail: ex.Message);
         }
     }
 
@@ -341,7 +345,7 @@ public class LockService
         var marker = LockedMarkerFile.ReadFrom(lockedMarkerPath);
         if (marker is null)
         {
-            return new UnlockResult(false, "", "找不到或無法解析這個 .locked 檔案");
+            return new UnlockResult(false, "", "找不到或無法解析這個 .locked 檔案", ErrorCode: ErrorCodes.InvalidMarker);
         }
 
         var vaultConfig = _vault.LoadOrCreateConfig();
@@ -349,19 +353,19 @@ public class LockService
 
         if (!marker.VerifySignature(signingKey))
         {
-            return new UnlockResult(false, "", "指標檔驗證失敗，內容可能已被竄改");
+            return new UnlockResult(false, "", "指標檔驗證失敗，內容可能已被竄改", ErrorCode: ErrorCodes.MarkerSignatureInvalid);
         }
 
         var metadata = _vault.LoadMetadata(marker.Uuid);
         if (metadata is null)
         {
-            return new UnlockResult(false, "", "在集中管理區找不到對應的加密內容");
+            return new UnlockResult(false, "", "在集中管理區找不到對應的加密內容", ErrorCode: ErrorCodes.VaultContentMissing);
         }
 
         var parentDir = Path.GetDirectoryName(Path.GetFullPath(lockedMarkerPath));
         if (parentDir is null)
         {
-            return new UnlockResult(false, "", "無法判斷指標檔所在的資料夾");
+            return new UnlockResult(false, "", "無法判斷指標檔所在的資料夾", ErrorCode: ErrorCodes.CannotDetermineFolder);
         }
 
         var result = DecryptAndRestore(metadata, password, parentDir);
@@ -392,13 +396,13 @@ public class LockService
         var metadata = _vault.LoadMetadata(uuid);
         if (metadata is null)
         {
-            return new UnlockResult(false, "", "找不到對應的加密紀錄");
+            return new UnlockResult(false, "", "找不到對應的加密紀錄", ErrorCode: ErrorCodes.RecordNotFound);
         }
 
         var destinationParentDir = ResolveDestinationParentDir(metadata, destinationDir, out var resolveError);
         if (destinationParentDir is null)
         {
-            return new UnlockResult(false, "", resolveError!);
+            return new UnlockResult(false, "", resolveError!, ErrorCode: ErrorCodes.ResolveDestinationError, ErrorDetail: resolveError);
         }
 
         var result = DecryptAndRestore(metadata, password, destinationParentDir);
@@ -420,20 +424,20 @@ public class LockService
         var metadata = _vault.LoadMetadata(uuid);
         if (metadata is null)
         {
-            return new UnlockResult(false, "", "找不到對應的加密紀錄");
+            return new UnlockResult(false, "", "找不到對應的加密紀錄", ErrorCode: ErrorCodes.RecordNotFound);
         }
 
         if (!metadata.PasskeyEnabled || metadata.PasskeyCredentialName is null
             || metadata.PasskeyChallenge is null || metadata.PasskeyWrappedContentKey is null)
         {
-            return new UnlockResult(false, "", "這個項目沒有啟用 Passkey 快速解鎖");
+            return new UnlockResult(false, "", "這個項目沒有啟用 Passkey 快速解鎖", ErrorCode: ErrorCodes.PasskeyNotEnabled);
         }
 
         var challenge = Convert.FromBase64String(metadata.PasskeyChallenge);
         var signature = await PasskeyProtector.SignChallengeAsync(metadata.PasskeyCredentialName, challenge, ownerWindowHandle);
         if (signature is null)
         {
-            return new UnlockResult(false, "", "Passkey 驗證失敗或已取消");
+            return new UnlockResult(false, "", "Passkey 驗證失敗或已取消", ErrorCode: ErrorCodes.PasskeyVerificationFailed);
         }
 
         byte[] contentKey;
@@ -451,7 +455,7 @@ public class LockService
         }
         catch (CryptographicException)
         {
-            return new UnlockResult(false, "", "Passkey 解包內容金鑰失敗，資料可能已損毀");
+            return new UnlockResult(false, "", "Passkey 解包內容金鑰失敗，資料可能已損毀", ErrorCode: ErrorCodes.PasskeyUnwrapFailed);
         }
         finally
         {
@@ -462,7 +466,7 @@ public class LockService
         if (destinationParentDir is null)
         {
             CryptographicOperations.ZeroMemory(contentKey);
-            return new UnlockResult(false, "", resolveError!);
+            return new UnlockResult(false, "", resolveError!, ErrorCode: ErrorCodes.ResolveDestinationError, ErrorDetail: resolveError);
         }
 
         var result = await Task.Run(() => RestoreFromKey(metadata, contentKey, destinationParentDir, "passkey"));
@@ -484,18 +488,18 @@ public class LockService
         var metadata = _vault.LoadMetadata(uuid);
         if (metadata is null)
         {
-            return new UnlockResult(false, "", "找不到對應的加密紀錄");
+            return new UnlockResult(false, "", "找不到對應的加密紀錄", ErrorCode: ErrorCodes.RecordNotFound);
         }
 
         if (!metadata.RecoveryKeyEnabled || metadata.RecoveryKeyWrappedContentKey is null)
         {
-            return new UnlockResult(false, "", "這個項目沒有啟用恢復金鑰");
+            return new UnlockResult(false, "", "這個項目沒有啟用恢復金鑰", ErrorCode: ErrorCodes.RecoveryKeyNotEnabled);
         }
 
         var recoveryKeyBytes = RecoveryKeyProtector.ParseUserInput(recoveryKeyInput);
         if (recoveryKeyBytes is null)
         {
-            return new UnlockResult(false, "", "恢復金鑰格式不正確，請確認有沒有打錯或漏掉字元");
+            return new UnlockResult(false, "", "恢復金鑰格式不正確，請確認有沒有打錯或漏掉字元", ErrorCode: ErrorCodes.RecoveryKeyInvalidFormat);
         }
 
         byte[] contentKey;
@@ -513,7 +517,7 @@ public class LockService
         }
         catch (CryptographicException)
         {
-            return new UnlockResult(false, "", "恢復金鑰不正確");
+            return new UnlockResult(false, "", "恢復金鑰不正確", ErrorCode: ErrorCodes.RecoveryKeyIncorrect);
         }
         finally
         {
@@ -524,7 +528,7 @@ public class LockService
         if (destinationParentDir is null)
         {
             CryptographicOperations.ZeroMemory(contentKey);
-            return new UnlockResult(false, "", resolveError!);
+            return new UnlockResult(false, "", resolveError!, ErrorCode: ErrorCodes.ResolveDestinationError, ErrorDetail: resolveError);
         }
 
         var result = RestoreFromKey(metadata, contentKey, destinationParentDir, "recoveryKey");
@@ -600,7 +604,7 @@ public class LockService
             var lockoutStatus = _lockout.CheckStatus(metadata.Uuid);
             if (lockoutStatus.IsLockedOut)
             {
-                return new UnlockResult(false, "", $"密碼錯誤次數過多，請在 {FormatRemaining(lockoutStatus.RemainingLockout!.Value)}後再試");
+                return new UnlockResult(false, "", $"密碼錯誤次數過多，請在 {FormatRemaining(lockoutStatus.RemainingLockout!.Value)}後再試", ErrorCode: ErrorCodes.LockedOut, ErrorDetail: ((int)lockoutStatus.RemainingLockout!.Value.TotalSeconds).ToString());
             }
         }
 
@@ -614,7 +618,7 @@ public class LockService
         if (!isValid || encryptionKey is null)
         {
             _lockout?.RecordFailedAttempt(metadata.Uuid);
-            return new UnlockResult(false, "", "密碼錯誤");
+            return new UnlockResult(false, "", "密碼錯誤", ErrorCode: ErrorCodes.PasswordIncorrect);
         }
 
         _lockout?.RecordSuccess(metadata.Uuid);
@@ -628,12 +632,6 @@ public class LockService
             : $"{Math.Ceiling(remaining.TotalSeconds)} 秒";
     }
 
-    /// <summary>
-    /// DecryptAndRestore（密碼路徑）跟 DecryptByPasskeyAsync／DecryptByRecoveryKeyAsync 共用的核心還原邏輯：
-    /// 拿到內容金鑰之後，解密內容、寫回目的地、清除 Vault 內的項目、記錄歷史紀錄。
-    /// 呼叫端負責把 encryptionKey 準備好（不管是密碼衍生、Passkey 解包，還是恢復金鑰解包出來的），
-    /// 這裡負責用完清零；unlockMethod 只是拿來寫進使用紀錄，不影響解密邏輯本身。
-    /// </summary>
     /// <summary>
     /// 安全檢查：metadata.OriginalName 理論上只會是加密當下用 Path.GetFileName 取出的單純檔名，
     /// 但 .meta.json 是明文的本機檔案，沒有像 .locked 指標檔那樣有 HMAC 簽章保護，理論上可能被竄改或損毀。
@@ -661,12 +659,18 @@ public class LockService
         return true;
     }
 
+    /// <summary>
+    /// DecryptAndRestore（密碼路徑）跟 DecryptByPasskeyAsync／DecryptByRecoveryKeyAsync 共用的核心還原邏輯：
+    /// 拿到內容金鑰之後，解密內容、寫回目的地、清除 Vault 內的項目、記錄歷史紀錄。
+    /// 呼叫端負責把 encryptionKey 準備好（不管是密碼衍生、Passkey 解包，還是恢復金鑰解包出來的），
+    /// 這裡負責用完清零；unlockMethod 只是拿來寫進使用紀錄，不影響解密邏輯本身。
+    /// </summary>
     private UnlockResult RestoreFromKey(LockedItemMetadata metadata, byte[] encryptionKey, string destinationParentDir, string unlockMethod)
     {
         if (!IsSafeRestoreFileName(metadata.OriginalName))
         {
             CryptographicOperations.ZeroMemory(encryptionKey);
-            return new UnlockResult(false, "", "這筆紀錄的檔名資訊看起來不正常（可能已損毀或被竄改），為了安全拒絕還原");
+            return new UnlockResult(false, "", "這筆紀錄的檔名資訊看起來不正常（可能已損毀或被竄改），為了安全拒絕還原", ErrorCode: ErrorCodes.UnsafeFileName);
         }
 
         var destinationPath = Path.Combine(destinationParentDir, metadata.OriginalName);
@@ -676,14 +680,14 @@ public class LockService
             if (Directory.Exists(destinationPath))
             {
                 CryptographicOperations.ZeroMemory(encryptionKey);
-                return new UnlockResult(false, "", $"還原失敗，目的地已經有同名資料夾：{destinationPath}");
+                return new UnlockResult(false, "", $"還原失敗，目的地已經有同名資料夾：{destinationPath}", ErrorCode: ErrorCodes.DestinationFolderExists, ErrorDetail: destinationPath);
             }
             Directory.CreateDirectory(FolderArchiver.TempDirectory);
         }
         else if (File.Exists(destinationPath))
         {
             CryptographicOperations.ZeroMemory(encryptionKey);
-            return new UnlockResult(false, "", $"還原失敗，目的地已經有同名檔案：{destinationPath}");
+            return new UnlockResult(false, "", $"還原失敗，目的地已經有同名檔案：{destinationPath}", ErrorCode: ErrorCodes.DestinationFileExists, ErrorDetail: destinationPath);
         }
 
         // 資料夾的話先解密寫進一個暫存 zip，再解壓縮還原成資料夾結構；檔案的話直接解密寫到目的地。
@@ -738,19 +742,19 @@ public class LockService
         }
         catch (CryptographicException)
         {
-            return new UnlockResult(false, "", "解密失敗，加密內容可能已損毀");
+            return new UnlockResult(false, "", "解密失敗，加密內容可能已損毀", ErrorCode: ErrorCodes.ContentCorrupted);
         }
         catch (InvalidDataException ex)
         {
-            return new UnlockResult(false, "", $"解密失敗，加密內容已損毀：{ex.Message}");
+            return new UnlockResult(false, "", $"解密失敗，加密內容已損毀：{ex.Message}", ErrorCode: ErrorCodes.ContentCorruptedWithDetail, ErrorDetail: ex.Message);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return new UnlockResult(false, "", $"解密過程發生錯誤：{ex.Message}");
+            return new UnlockResult(false, "", $"解密過程發生錯誤：{ex.Message}", ErrorCode: ErrorCodes.DecryptError, ErrorDetail: ex.Message);
         }
         catch (Exception ex)
         {
-            return new UnlockResult(false, "", $"解密過程發生未預期的錯誤：{ex.Message}");
+            return new UnlockResult(false, "", $"解密過程發生未預期的錯誤：{ex.Message}", ErrorCode: ErrorCodes.DecryptUnexpectedError, ErrorDetail: ex.Message);
         }
     }
 
@@ -760,7 +764,7 @@ public class LockService
             var metadata = _vault.LoadMetadata(uuid);
             if (metadata is null)
             {
-                return new DeleteRecordResult(false, false, null, "找不到對應的加密紀錄");
+                return new DeleteRecordResult(false, false, null, "找不到對應的加密紀錄", ErrorCode: ErrorCodes.RecordNotFound);
             }
 
             if (metadata.ContainsNestedLocks.Count > 0 && !force)

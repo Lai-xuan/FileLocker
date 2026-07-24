@@ -652,4 +652,61 @@ public class LockServiceTests : IDisposable
             File.Copy(filePath, Path.Combine(destinationDir, Path.GetFileName(filePath)));
         }
     }
+
+    // ---- 對應多語言錯誤代碼系統（2026-07-24）：確認常見錯誤情境都有帶上 ErrorCode，
+    // 前端才有辦法查表翻譯，不是只能顯示固定的繁體中文。 ----
+
+    [Fact]
+    public async Task DecryptAsync_WithWrongPassword_ReturnsPasswordIncorrectErrorCode()
+    {
+        var filePath = Path.Combine(_workDir.FullName, "錯誤代碼測試1.txt");
+        File.WriteAllText(filePath, "內容");
+        var lockResult = await _service.EncryptAsync(filePath, "correct-password", null);
+
+        var result = await _service.DecryptAsync(lockResult.LockedMarkerPath, "wrong-password");
+
+        Assert.False(result.Success);
+        Assert.Equal("PASSWORD_INCORRECT", result.ErrorCode);
+    }
+
+    [Fact]
+    public async Task DecryptByUuidAsync_WithNonexistentUuid_ReturnsRecordNotFoundErrorCode()
+    {
+        var result = await _service.DecryptByUuidAsync(Guid.NewGuid().ToString(), "any-password");
+
+        Assert.False(result.Success);
+        Assert.Equal("RECORD_NOT_FOUND", result.ErrorCode);
+    }
+
+    [Fact]
+    public async Task DecryptByRecoveryKeyAsync_WithInvalidFormat_ReturnsRecoveryKeyInvalidFormatErrorCode()
+    {
+        var filePath = Path.Combine(_workDir.FullName, "錯誤代碼測試2.txt");
+        File.WriteAllText(filePath, "內容");
+        var lockResult = await _service.EncryptAsync(filePath, "password", null, enableRecoveryKey: true);
+
+        var result = await _service.DecryptByRecoveryKeyAsync(lockResult.Uuid, "這不是合法的恢復金鑰格式");
+
+        Assert.False(result.Success);
+        Assert.Equal("RECOVERY_KEY_INVALID_FORMAT", result.ErrorCode);
+    }
+
+    [Fact]
+    public async Task DecryptAsync_WhenLockedOut_ReturnsLockedOutErrorCodeWithRemainingSecondsAsDetail()
+    {
+        var filePath = Path.Combine(_workDir.FullName, "錯誤代碼測試3.txt");
+        File.WriteAllText(filePath, "內容");
+        var lockResult = await _service.EncryptAsync(filePath, "correct-password", null);
+
+        for (var i = 0; i < 5; i++)
+        {
+            await _service.DecryptAsync(lockResult.LockedMarkerPath, "wrong-password");
+        }
+
+        var result = await _service.DecryptAsync(lockResult.LockedMarkerPath, "correct-password");
+
+        Assert.False(result.Success);
+        Assert.Equal("LOCKED_OUT", result.ErrorCode);
+        Assert.True(int.TryParse(result.ErrorDetail, out var seconds) && seconds > 0);
+    }
 }

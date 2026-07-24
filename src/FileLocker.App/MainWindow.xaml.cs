@@ -280,6 +280,8 @@ public partial class MainWindow : Window
                 uuid = result.Uuid,
                 lockedMarkerPath = result.LockedMarkerPath,
                 errorMessage = result.ErrorMessage,
+                errorCode = result.ErrorCode,
+                errorDetail = result.ErrorDetail,
                 passkeyRequested = enablePasskey,
                 passkeyEnabled = actuallyPasskeyEnabled,
                 recoveryKey = result.RecoveryKey
@@ -301,7 +303,9 @@ public partial class MainWindow : Window
             type = "decryptResult",
             success = result.Success,
             restoredPath = result.RestoredPath,
-            errorMessage = result.ErrorMessage
+            errorMessage = result.ErrorMessage,
+            errorCode = result.ErrorCode,
+            errorDetail = result.ErrorDetail
         });
     }
 
@@ -324,7 +328,9 @@ public partial class MainWindow : Window
             uuid,
             success = result.Success,
             restoredPath = result.RestoredPath,
-            errorMessage = result.ErrorMessage
+            errorMessage = result.ErrorMessage,
+            errorCode = result.ErrorCode,
+            errorDetail = result.ErrorDetail
         });
     }
 
@@ -343,7 +349,9 @@ public partial class MainWindow : Window
             uuid,
             success = result.Success,
             restoredPath = result.RestoredPath,
-            errorMessage = result.ErrorMessage
+            errorMessage = result.ErrorMessage,
+            errorCode = result.ErrorCode,
+            errorDetail = result.ErrorDetail
         });
     }
 
@@ -362,7 +370,9 @@ public partial class MainWindow : Window
             uuid,
             success = result.Success,
             restoredPath = result.RestoredPath,
-            errorMessage = result.ErrorMessage
+            errorMessage = result.ErrorMessage,
+            errorCode = result.ErrorCode,
+            errorDetail = result.ErrorDetail
         });
     }
 
@@ -397,7 +407,9 @@ public partial class MainWindow : Window
                 uuid,
                 success = result.Success,
                 restoredPath = result.RestoredPath,
-                errorMessage = result.ErrorMessage
+                errorMessage = result.ErrorMessage,
+            errorCode = result.ErrorCode,
+            errorDetail = result.ErrorDetail
             });
         }
 
@@ -683,7 +695,8 @@ public partial class MainWindow : Window
             success = result.Success,
             blockedByNestedLocks = result.BlockedByNestedLocks,
             nestedUuids = result.NestedUuids,
-            errorMessage = result.ErrorMessage
+            errorMessage = result.ErrorMessage,
+            errorCode = result.ErrorCode
         });
     }
 

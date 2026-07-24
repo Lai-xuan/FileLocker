@@ -19,6 +19,33 @@ function t(key, params) {
   return text
 }
 
+// 後端（C#）失敗結果目前有兩種：新的走 errorCode／errorDetail（例如密碼錯誤、找不到紀錄這些
+// 常見情境，能完整翻譯），舊的／少數還沒涵蓋到的邊界情況只有固定繁體中文的 errorMessage
+// （例如搬移 Vault、存恢復金鑰檔案失敗這些）。這個函式統一處理：有 errorCode 且查得到翻譯就用
+// 翻譯後的文字，查不到（或根本沒有 errorCode）就退回原本的繁體中文 errorMessage，不會讓使用者
+// 看到「錯誤代碼」這種內部識別字串。
+function translateError(errorCode, errorDetail, fallbackMessage) {
+  if (!errorCode) {
+    return fallbackMessage
+  }
+  let detail = errorDetail
+  if (errorCode === 'LOCKED_OUT' && errorDetail) {
+    detail = formatRemainingTime(parseInt(errorDetail, 10))
+  }
+  const key = `error.${errorCode}`
+  const translated = t(key, { detail })
+  return translated !== key ? translated : fallbackMessage
+}
+
+// 鎖定剩餘時間的格式，跟 LockService.FormatRemaining 的邏輯對應，但這裡依目前語言決定用詞
+// （後端只給原始秒數，格式化交給前端才能配合語言顯示）。
+function formatRemainingTime(seconds) {
+  if (currentLocale.value === 'en') {
+    return seconds >= 60 ? `${Math.ceil(seconds / 60)} minute(s)` : `${seconds} second(s)`
+  }
+  return seconds >= 60 ? `${Math.ceil(seconds / 60)} 分鐘` : `${seconds} 秒`
+}
+
 const activeTab = ref('encrypt')
 const activeListSubTab = ref('files') // 'files' | 'history'
 
@@ -95,7 +122,7 @@ if (isRunningInWebView2) {
       encryptItemResults.value.push({
         path: data.path,
         success: data.success,
-        errorMessage: data.errorMessage,
+        errorMessage: translateError(data.errorCode, data.errorDetail, data.errorMessage),
         note
       })
       if (data.recoveryKey) {
@@ -110,14 +137,14 @@ if (isRunningInWebView2) {
       decryptResultIsError.value = !data.success
       decryptResultMessage.value = data.success
         ? t('decrypt.success', { path: data.restoredPath })
-        : t('decrypt.failed', { error: data.errorMessage })
+        : translateError(data.errorCode, data.errorDetail, t('decrypt.failed', { error: data.errorMessage }))
     } else if (data.type === 'decryptByUuidResult') {
       decryptingUuids.value.delete(data.uuid)
       if (data.success) {
         vaultItems.value = vaultItems.value.filter((item) => item.uuid !== data.uuid)
         alert(t('decrypt.success', { path: data.restoredPath }))
       } else {
-        alert(t('decrypt.failed', { error: data.errorMessage }))
+        alert(translateError(data.errorCode, data.errorDetail, t('decrypt.failed', { error: data.errorMessage })))
       }
     } else if (data.type === 'decryptByPasskeyResult') {
       decryptingUuids.value.delete(data.uuid)
@@ -125,7 +152,7 @@ if (isRunningInWebView2) {
         vaultItems.value = vaultItems.value.filter((item) => item.uuid !== data.uuid)
         alert(t('alert.passkeyDecryptSuccess', { path: data.restoredPath }))
       } else {
-        alert(t('alert.passkeyDecryptFailed', { error: data.errorMessage }))
+        alert(translateError(data.errorCode, data.errorDetail, t('alert.passkeyDecryptFailed', { error: data.errorMessage })))
       }
     } else if (data.type === 'decryptByRecoveryKeyResult') {
       decryptingUuids.value.delete(data.uuid)
@@ -133,7 +160,7 @@ if (isRunningInWebView2) {
         vaultItems.value = vaultItems.value.filter((item) => item.uuid !== data.uuid)
         alert(t('alert.recoveryKeyDecryptSuccess', { path: data.restoredPath }))
       } else {
-        alert(t('alert.recoveryKeyDecryptFailed', { error: data.errorMessage }))
+        alert(translateError(data.errorCode, data.errorDetail, t('alert.recoveryKeyDecryptFailed', { error: data.errorMessage })))
       }
     } else if (data.type === 'decryptBatchStarted') {
       // totalCount 目前先不用另外存，逐項回報時直接從 vaultItems 篩掉即可。
@@ -578,7 +605,7 @@ function handleDeleteRecordResult(data) {
     alert(t('alert.deleteBlockedByNested', { count: data.nestedUuids.length }))
     return
   }
-  alert(t('alert.deleteFailed', { error: data.errorMessage }))
+  alert(translateError(data.errorCode, null, t('alert.deleteFailed', { error: data.errorMessage })))
 }
 
 function formatSize(bytes) {

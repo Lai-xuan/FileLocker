@@ -130,5 +130,31 @@
   "batchPreview.suffix": "...and {count} more",
 
   "note.passkeyNotEnabled": "Passkey was not enabled successfully (unsupported device or verification cancelled) — only password protection is active.",
-  "note.passkeyEnabled": "Passkey enabled."
+  "note.passkeyEnabled": "Passkey enabled.",
+
+  "error.SOURCE_NOT_FOUND": "File or folder not found: {detail}",
+  "error.MARKER_ALREADY_EXISTS": "A marker file already exists at the target location: {detail}",
+  "error.ENCRYPT_ERROR": "An error occurred during encryption: {detail}",
+  "error.ENCRYPT_UNEXPECTED_ERROR": "An unexpected error occurred during encryption: {detail}",
+  "error.INVALID_MARKER": "This .locked file could not be found or parsed",
+  "error.MARKER_SIGNATURE_INVALID": "Marker file verification failed — the content may have been tampered with",
+  "error.VAULT_CONTENT_MISSING": "The corresponding encrypted content could not be found in the vault",
+  "error.CANNOT_DETERMINE_FOLDER": "Could not determine the folder containing the marker file",
+  "error.RECORD_NOT_FOUND": "No matching encrypted record was found",
+  "error.RESOLVE_DESTINATION_ERROR": "Could not determine the restore destination: {detail}",
+  "error.PASSKEY_NOT_ENABLED": "Passkey quick unlock is not enabled for this item",
+  "error.PASSKEY_VERIFICATION_FAILED": "Passkey verification failed or was cancelled",
+  "error.PASSKEY_UNWRAP_FAILED": "Failed to unwrap the content key with Passkey — the data may be corrupted",
+  "error.RECOVERY_KEY_NOT_ENABLED": "Recovery key is not enabled for this item",
+  "error.RECOVERY_KEY_INVALID_FORMAT": "The recovery key format is invalid — please check for typos or missing characters",
+  "error.RECOVERY_KEY_INCORRECT": "Incorrect recovery key",
+  "error.LOCKED_OUT": "Too many incorrect password attempts. Please try again in {detail}",
+  "error.PASSWORD_INCORRECT": "Incorrect password",
+  "error.UNSAFE_FILENAME": "This record's filename information looks abnormal (it may be corrupted or tampered with) — restore was blocked for safety",
+  "error.DESTINATION_FOLDER_EXISTS": "Restore failed — a folder with the same name already exists at the destination: {detail}",
+  "error.DESTINATION_FILE_EXISTS": "Restore failed — a file with the same name already exists at the destination: {detail}",
+  "error.CONTENT_CORRUPTED": "Decryption failed — the encrypted content may be corrupted",
+  "error.CONTENT_CORRUPTED_WITH_DETAIL": "Decryption failed — the encrypted content is corrupted: {detail}",
+  "error.DECRYPT_ERROR": "An error occurred during decryption: {detail}",
+  "error.DECRYPT_UNEXPECTED_ERROR": "An unexpected error occurred during decryption: {detail}"
 }

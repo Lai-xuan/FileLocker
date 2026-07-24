@@ -130,5 +130,31 @@
   "batchPreview.suffix": "...等{count}個文件",
 
   "note.passkeyNotEnabled": "Passkey 未成功啟用（裝置不支援或驗證被取消），只有密碼保護。",
-  "note.passkeyEnabled": "Passkey 已啟用。"
+  "note.passkeyEnabled": "Passkey 已啟用。",
+
+  "error.SOURCE_NOT_FOUND": "找不到檔案或資料夾：{detail}",
+  "error.MARKER_ALREADY_EXISTS": "目標位置已經有一個指標檔了：{detail}",
+  "error.ENCRYPT_ERROR": "加密過程發生錯誤：{detail}",
+  "error.ENCRYPT_UNEXPECTED_ERROR": "加密過程發生未預期的錯誤：{detail}",
+  "error.INVALID_MARKER": "找不到或無法解析這個 .locked 檔案",
+  "error.MARKER_SIGNATURE_INVALID": "指標檔驗證失敗，內容可能已被竄改",
+  "error.VAULT_CONTENT_MISSING": "在集中管理區找不到對應的加密內容",
+  "error.CANNOT_DETERMINE_FOLDER": "無法判斷指標檔所在的資料夾",
+  "error.RECORD_NOT_FOUND": "找不到對應的加密紀錄",
+  "error.RESOLVE_DESTINATION_ERROR": "無法判斷還原目的地：{detail}",
+  "error.PASSKEY_NOT_ENABLED": "這個項目沒有啟用 Passkey 快速解鎖",
+  "error.PASSKEY_VERIFICATION_FAILED": "Passkey 驗證失敗或已取消",
+  "error.PASSKEY_UNWRAP_FAILED": "Passkey 解包內容金鑰失敗，資料可能已損毀",
+  "error.RECOVERY_KEY_NOT_ENABLED": "這個項目沒有啟用恢復金鑰",
+  "error.RECOVERY_KEY_INVALID_FORMAT": "恢復金鑰格式不正確，請確認有沒有打錯或漏掉字元",
+  "error.RECOVERY_KEY_INCORRECT": "恢復金鑰不正確",
+  "error.LOCKED_OUT": "密碼錯誤次數過多，請在 {detail} 後再試",
+  "error.PASSWORD_INCORRECT": "密碼錯誤",
+  "error.UNSAFE_FILENAME": "這筆紀錄的檔名資訊看起來不正常（可能已損毀或被竄改），為了安全拒絕還原",
+  "error.DESTINATION_FOLDER_EXISTS": "還原失敗，目的地已經有同名資料夾：{detail}",
+  "error.DESTINATION_FILE_EXISTS": "還原失敗，目的地已經有同名檔案：{detail}",
+  "error.CONTENT_CORRUPTED": "解密失敗，加密內容可能已損毀",
+  "error.CONTENT_CORRUPTED_WITH_DETAIL": "解密失敗，加密內容已損毀：{detail}",
+  "error.DECRYPT_ERROR": "解密過程發生錯誤：{detail}",
+  "error.DECRYPT_UNEXPECTED_ERROR": "解密過程發生未預期的錯誤：{detail}"
 }
