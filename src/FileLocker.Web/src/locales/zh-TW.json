@@ -35,6 +35,7 @@
   "list.subTabFiles": "已加密檔案",
   "list.subTabHistory": "使用紀錄",
   "list.refresh": "重新整理",
+  "list.updateAvailable": "有更新，點此重新整理",
   "list.loading": "載入中...",
   "list.noItems": "目前沒有任何加密項目。",
   "list.colName": "名稱",

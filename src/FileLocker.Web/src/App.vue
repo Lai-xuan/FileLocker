@@ -328,6 +328,10 @@ const decryptItemInfo = ref(null) // { uuid, originalName, hint, passkeyEnabled,
 // ---- 已加密檔案子頁籤 ----
 const vaultItems = ref([])
 const isLoadingList = ref(false)
+// 使用者停在清單頁時，背景 watcher 偵測到 Vault 有變化就把這個設成 true，只顯示「有更新」
+// 提示、不強制整包刷新畫面——vaultList 是整包覆蓋（見下面 vaultList 處理），靜默自動刷新
+// 會讓使用者正在互動的項目突然消失或位移，體驗比多一個小提示更糟。
+const vaultListStale = ref(false)
 const decryptingUuids = ref(new Set())
 const expandedGroups = ref(new Set())
 const decryptingBatchIds = ref(new Set())
@@ -537,6 +541,12 @@ if (isRunningInWebView2) {
         isLoadingList.value = false
         vaultItems.value = data.items
       })
+    } else if (data.type === 'vaultChanged') {
+      // 使用者不在清單頁的話什麼都不用做——之後切換分頁時，既有的 watch(activeTab)/
+      // watch(activeListSubTab) 邏輯自然會呼叫 refreshList() 拿到最新資料。
+      if (activeTab.value === 'list' && activeListSubTab.value === 'files') {
+        vaultListStale.value = true
+      }
     } else if (data.type === 'historyList') {
       applyAfterMinSkeletonDuration(historyLoadStartedAt, () => {
         isLoadingHistory.value = false
@@ -623,6 +633,7 @@ function applyAfterMinSkeletonDuration(startedAt, applyFn) {
 
 function refreshList() {
   isLoadingList.value = true
+  vaultListStale.value = false
   listLoadStartedAt = Date.now()
   window.chrome.webview.postMessage({ type: 'listVault' })
 }
@@ -1219,6 +1230,9 @@ function historyDetailText(entry) {
           </div>
 
           <div v-if="activeListSubTab === 'files'">
+            <div v-if="vaultListStale" class="update-banner" @click="refreshList">
+              {{ t('list.updateAvailable') }}
+            </div>
             <button class="button button--secondary refresh-button" @click="refreshList" :disabled="isLoadingList">
               {{ isLoadingList ? t('list.loading') : t('list.refresh') }}
             </button>
@@ -2418,6 +2432,21 @@ textarea.text-input {
 
 .refresh-button {
   margin-bottom: 1rem;
+}
+
+.update-banner {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.75rem;
+  padding: 0.5rem 0.85rem;
+  border-radius: var(--radius-sm);
+  background: var(--color-accent-soft);
+  border: 1px solid var(--color-accent-border);
+  color: var(--color-accent);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background-color var(--duration-fast) ease;
 }
 
 /* ---- 表格：外框用陰影而不是描邊，橫向內容過長時整個表格區域自己捲動，

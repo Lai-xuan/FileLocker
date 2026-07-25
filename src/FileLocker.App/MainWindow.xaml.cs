@@ -86,6 +86,8 @@ public partial class MainWindow : Window
     private readonly AppSettingsManager _settingsManager;
     private readonly AppSettings _settings;
     private readonly string _appDataDir;
+    private readonly VaultIndexCache _vaultIndexCache;
+    private readonly VaultChangeWatcher _vaultChangeWatcher;
     private readonly List<string>? _initialPaths;
 
     /// <summary>
@@ -97,6 +99,7 @@ public partial class MainWindow : Window
     public MainWindow(
         VaultManager vaultManager, HistoryLogger historyLogger, LockService lockService,
         AppSettingsManager settingsManager, AppSettings settings, string appDataDir,
+        VaultIndexCache vaultIndexCache, VaultChangeWatcher vaultChangeWatcher,
         List<string>? initialPaths = null)
     {
         InitializeComponent();
@@ -107,7 +110,16 @@ public partial class MainWindow : Window
         _settingsManager = settingsManager;
         _settings = settings;
         _appDataDir = appDataDir;
+        _vaultIndexCache = vaultIndexCache;
+        _vaultChangeWatcher = vaultChangeWatcher;
         _initialPaths = initialPaths;
+
+        // Watcher 偵測到 Vault 變化（背景執行緒觸發）時，推播一則通知給前端清單頁——
+        // 沿用既有的「背景推送資料進已開啟視窗」模式（見 ApplyIncomingPaths）。
+        // 必須用 Dispatcher 切回 UI 執行緒，SendToFrontend 底層是 WebView2 COM 物件，
+        // 不能從背景執行緒直接呼叫。
+        _vaultChangeWatcher.Changed += (_, _) =>
+            Dispatcher.BeginInvoke(() => SendToFrontend(new { type = "vaultChanged" }));
 
         // 啟動時就先套用一次已儲存的主題背景色，不要等使用者到設定頁重新選一次才生效——
         // 不然重開 App 之後，即使上次選的是深色模式，WebView2 邊緣那圈窄邊還是會先閃一下
@@ -919,30 +931,32 @@ public partial class MainWindow : Window
     {
         var items = await Task.Run(() =>
         {
-            // 每一筆的 CheckMarkerStatus 都是各自獨立的檔案讀取，彼此不共用狀態，
-            // 用 AsParallel 讓多筆的檔案 I/O 可以同時進行，而不是一筆一筆排隊等——
-            // 項目數量少的時候感覺不出差異，項目一多（幾百筆）刷新清單會明顯變快。
-            var metadataList = _vaultManager.ScanAll().ToList();
+            // 清單「有哪些項目」改讀 VaultIndexCache（本機 SQLite 快取，不用每次都全量重掃
+            // Vault 資料夾）；但每一筆的 CheckMarkerStatus 仍然是即時查詢——那是原始位置的
+            // .locked 指標檔還在不在，跟 Vault 資料夾內容無關，本來就該每次刷新都重新問一次
+            // 磁碟，不應該被快取。用 AsParallel 讓多筆的檔案 I/O 可以同時進行，而不是一筆一筆
+            // 排隊等——項目數量少的時候感覺不出差異，項目一多（幾百筆）刷新清單會明顯變快。
+            var entries = _vaultIndexCache.GetItems();
 
-            return metadataList
+            return entries
                 .AsParallel()
-                .Select(m =>
+                .Select(entry =>
                 {
-                    var markerStatus = _lockService.CheckMarkerStatus(m);
+                    var markerStatus = _lockService.CheckMarkerStatus(entry.Uuid, entry.OriginalPath, entry.Type);
                     return new
                     {
-                        uuid = m.Uuid,
-                        originalName = m.OriginalName,
-                        originalPath = m.OriginalPath,
-                        type = m.Type.ToString(),
-                        passkeyEnabled = m.PasskeyEnabled,
-                        recoveryKeyEnabled = m.RecoveryKeyEnabled,
-                        batchId = m.BatchId,
-                        originalSizeBytes = m.OriginalSizeBytes,
-                        hint = m.Hint,
-                        createdAtUtc = m.CreatedAtUtc,
-                        hasNestedLocks = m.ContainsNestedLocks.Count > 0,
-                        nestedLockCount = m.ContainsNestedLocks.Count,
+                        uuid = entry.Uuid,
+                        originalName = entry.OriginalName,
+                        originalPath = entry.OriginalPath,
+                        type = entry.Type.ToString(),
+                        passkeyEnabled = entry.PasskeyEnabled,
+                        recoveryKeyEnabled = entry.RecoveryKeyEnabled,
+                        batchId = entry.BatchId,
+                        originalSizeBytes = entry.OriginalSizeBytes,
+                        hint = entry.Hint,
+                        createdAtUtc = entry.CreatedAtUtc,
+                        hasNestedLocks = entry.NestedLockCount > 0,
+                        nestedLockCount = entry.NestedLockCount,
                         markerFound = markerStatus.Found,
                         markerStatusMessage = markerStatus.Message
                     };

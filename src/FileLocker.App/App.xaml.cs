@@ -31,6 +31,8 @@ public partial class App : Application
     private AppSettingsManager? _settingsManager;
     private AppSettings? _settings;
     private string? _appDataDir;
+    private VaultIndexCache? _vaultIndexCache;
+    private VaultChangeWatcher? _vaultChangeWatcher;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -78,6 +80,13 @@ public partial class App : Application
         _settings = settings;
         _appDataDir = appDataDir;
 
+        // 清單頁快取索引：跟 appDataDir 一樣是固定、不可搬的本機路徑（不能放 Vault 資料夾內，
+        // 見 VaultIndexCache 上的說明），VaultIndexCache 建構時就會確保快取跟目前 Vault 路徑
+        // 一致（不一致就整個重建），建構完成後 GetItems() 保證可用。
+        _vaultIndexCache = new VaultIndexCache(_vaultManager, Path.Combine(appDataDir, "VaultIndexCache"));
+        _vaultChangeWatcher = new VaultChangeWatcher(settings.VaultPath, _vaultIndexCache);
+        _vaultChangeWatcher.Start();
+
         StartPipeServerListener();
 
         // 檢查／需要的話自動註冊 Shell Extension（見 ShellExtensionRegistrar 說明）。
@@ -101,6 +110,8 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _vaultChangeWatcher?.Dispose();
+        _vaultIndexCache?.Dispose();
         _singleInstanceMutex?.ReleaseMutex();
         _singleInstanceMutex?.Dispose();
         base.OnExit(e);
@@ -137,6 +148,7 @@ public partial class App : Application
 
         var mainWindow = new MainWindow(
             _vaultManager!, _historyLogger!, _lockService!, _settingsManager!, _settings!, _appDataDir!,
+            _vaultIndexCache!, _vaultChangeWatcher!,
             initialPaths.Count > 0 ? initialPaths : null);
         mainWindow.Closed += (_, _) => ShutdownIfNoWindowsRemain();
         MainWindow = mainWindow;

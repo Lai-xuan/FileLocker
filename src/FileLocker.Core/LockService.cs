@@ -785,8 +785,15 @@ public class LockService
         });
 
     public MarkerStatus CheckMarkerStatus(LockedItemMetadata metadata)
+        => CheckMarkerStatus(metadata.Uuid, metadata.OriginalPath, metadata.Type);
+
+    /// <summary>
+    /// 只吃清單頁實際需要的三個欄位，讓呼叫端（例如用 VaultIndexEntry 快取投影組出清單時）
+    /// 不需要為了呼叫這個方法，硬湊一個帶假資料的完整 LockedItemMetadata。
+    /// </summary>
+    public MarkerStatus CheckMarkerStatus(string uuid, string originalPath, ItemType type)
     {
-        var expectedPath = ComputeMarkerPath(metadata.OriginalPath, metadata.Type == ItemType.Folder);
+        var expectedPath = ComputeMarkerPath(originalPath, type == ItemType.Folder);
 
         if (!File.Exists(expectedPath))
         {
@@ -799,7 +806,7 @@ public class LockService
             return new MarkerStatus(false, null, "原本位置的檔案無法解析為指標檔");
         }
 
-        if (marker.Uuid != metadata.Uuid)
+        if (marker.Uuid != uuid)
         {
             return new MarkerStatus(false, null, "原本的位置已經被別的加密項目取代");
         }

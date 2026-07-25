@@ -35,6 +35,7 @@
   "list.subTabFiles": "Encrypted Files",
   "list.subTabHistory": "History",
   "list.refresh": "Refresh",
+  "list.updateAvailable": "Updates available — click to refresh",
   "list.loading": "Loading...",
   "list.noItems": "No encrypted items yet.",
   "list.colName": "Name",
