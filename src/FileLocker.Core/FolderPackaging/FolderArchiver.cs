@@ -10,7 +10,8 @@ public static class FolderArchiver
 {
     public static string TempDirectory => Path.Combine(Path.GetTempPath(), "FileLocker");
 
-    /// <summary>將整個資料夾壓縮成暫存 zip，回傳暫存 zip 路徑。呼叫端負責在加密完成後用 SecureFileEraser 清除這個暫存檔。</summary>
+    /// <summary>將整個資料夾壓縮成暫存 zip，回傳暫存 zip 路徑。呼叫端負責在加密完成後用
+    /// SecureFileEraser 清除這個暫存檔。</summary>
     public static string CompressToTempZip(string folderPath)
     {
         if (!Directory.Exists(folderPath))
@@ -23,7 +24,14 @@ public static class FolderArchiver
 
         // includeBaseDirectory: false，讓 zip 內是資料夾「裡面」的內容，不多包一層跟原資料夾同名的目錄，
         // 這樣解壓縮回原始位置時，還原出來的結構才會跟原本一致。
-        ZipFile.CreateFromDirectory(folderPath, tempZipPath, CompressionLevel.Optimal, includeBaseDirectory: false);
+        //
+        // CompressionLevel.NoCompression（不是 Optimal）：這個 zip 純粹是拿來當「把整個資料夾打包成
+        // 一份東西」的容器，用途不是省空間——壓縮完馬上就會整包做 AES-GCM 加密，加密過的內容本質上是
+        // 隨機亂碼、天生不可再壓縮，所以先在這裡花 CPU 做完整的 DEFLATE 壓縮，對最終檔案大小完全沒有
+        // 貢獻。對已經是壓縮格式的內容（影片、照片、zip 包 zip 這類，這是大容量資料夾最常見的組成）
+        // 更是幾乎沒有壓縮效果、卻要吃滿 CPU 時間，是加密大型資料夾偏慢最主要的原因之一。改成不壓縮，
+        // 只是單純把檔案份份存進 zip 容器，換取速度。
+        ZipFile.CreateFromDirectory(folderPath, tempZipPath, CompressionLevel.NoCompression, includeBaseDirectory: false);
 
         return tempZipPath;
     }
