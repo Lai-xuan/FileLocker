@@ -1,9 +1,58 @@
-﻿<Window x:Class="FileLocker.App.MainWindow"
+<Window x:Class="FileLocker.App.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
-        Title="FileLocker" Height="600" Width="900">
+        Title="FileLocker" Height="920" Width="960" MinHeight="600" MinWidth="720"
+        WindowStyle="None"
+        ResizeMode="CanResize"
+        Background="White">
+
+    <!--
+        無邊框視窗：拿掉 Windows 原生標題列，改由 WebView2 裡的 HTML 自己畫（macOS 風格的
+        左上角三顆按鈕）。這裡用 WindowChrome 而不是單純設 WindowStyle="None"，原因是
+        WindowChrome 會保留視窗管理員該有的原生行為——邊緣拖曳縮放、Aero Snap（拖到螢幕邊緣
+        自動分割）、最大化時正確避開工作列，這些如果自己重寫幾乎不可能做得跟系統一樣好。
+
+        CaptionHeight="0"：不保留任何原生標題列高度，整個區域都交給 WebView2；
+        拖曳改由 HTML 端的 app-region: drag 處理（見 MainWindow.xaml.cs 的
+        IsNonClientRegionSupportEnabled 說明）。
+
+        GlassFrameThickness="0,0,0,1"：底部留一條幾乎看不見的 1px 玻璃邊框，不是打字錯誤——
+        設成完全 0 會讓 DWM 連原生投影效果都一起關掉，變成一個平貼在背景上的方框，留這一絲
+        寬度可以讓系統投影繼續生效，視覺上感覺不出差異。圓角則是另外在 MainWindow.xaml.cs 裡
+        用 DwmSetWindowAttribute 手動要回來（WindowStyle="None" 預設也會把 Windows 11 的
+        圓角一起拿掉）。
+
+        刻意不設 AllowsTransparency="True"：那會強制 WPF 走軟體算圖路徑，WebView2 的
+        繪製效能會明顯變差，而且這個 App 也不需要真的透明的視窗。
+    -->
+    <shell:WindowChrome.WindowChrome>
+        <shell:WindowChrome CaptionHeight="0"
+                            ResizeBorderThickness="6"
+                            CornerRadius="0"
+                            GlassFrameThickness="0,0,0,1"
+                            UseAeroCaptionButtons="False" />
+    </shell:WindowChrome.WindowChrome>
+
     <Grid>
-        <wv2:WebView2 x:Name="MainWebView" />
+        <!--
+            Margin="6"：對應已知的 WebView2 + WindowChrome bug（微軟官方已確認、追蹤中，
+            見 MicrosoftEdge/WebView2Feedback#4538）——WebView2 內部是獨立的原生子視窗，
+            不是純 WPF 畫的內容，填滿整個視窗時會把邊緣縮放需要的滑鼠事件整個截走，
+            WindowChrome 偵測不到，導致完全無法拖曳邊緣調整大小。目前唯一已知的解法是
+            留一圈真正的 WPF 空間（不被 WebView2 佔用）給縮放偵測用，這條窄邊寬度要跟
+            WindowChrome 的 ResizeBorderThickness 一致。代價是視窗邊緣會有一條窄窄的
+            實色邊，不是完全無縫——這是目前技術限制下的取捨，不是設定錯誤。
+
+            拖放檔案支援：不透過 WPF 層級的原生拖放（試過，WebView2 的原生子視窗會把整個
+            拖放操作攔死，訊息完全傳不到外層——這是同一種 airspace 問題）。改用 WebView2
+            專門為此設計的官方管道：JS 端正常接住 HTML5 drop 事件（這步在 WebView2 內部
+            本來就正常運作），再用 postMessageWithAdditionalObjects 把 File 物件連同真正的
+            磁碟路徑一起送出來，C# 端收到的是 CoreWebView2File，讀 .Path 屬性即可，
+            見 MainWindow.xaml.cs 的 OnWebMessageReceived 說明。這個做法完全不需要
+            AllowExternalDrop="False"，維持預設值即可。
+        -->
+        <wv2:WebView2 x:Name="MainWebView" Margin="6" />
     </Grid>
 </Window>

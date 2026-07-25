@@ -1,6 +1,8 @@
 ﻿using System.IO;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Media;
 using System.Windows.Interop;
 using FileLocker.Core;
 using FileLocker.Core.History;
@@ -15,6 +17,68 @@ public partial class MainWindow : Window
     // Release 建置時 SetVirtualHostNameToFolderMapping 用的虛擬主機名稱，純粹是本機識別用，
     // 不是真的網域，不需要真的擁有或註冊這個名稱。
     private const string AppOrigin = "filelocker.local";
+
+    // ---- 無邊框視窗的兩個已知陷阱修正 ----
+    //
+    // 1. 圓角／陰影：WindowStyle="None" 拿掉原生標題列的同時，也會把 Windows 11 預設的
+    //    視窗圓角跟投影一起拿掉，變成一個直角的方框。用 DwmSetWindowAttribute 手動要回來。
+    //    Windows 10 沒有這個 DWM 屬性，呼叫會失敗，安靜略過即可，不影響其他功能。
+    //
+    // 2. 最大化超出工作區：這是 WindowChrome 無邊框視窗的經典 bug——WPF 內建的最大化尺寸
+    //    計算沒有正確扣掉隱形的縮放邊框（ResizeBorderThickness），導致視窗最大化時會往外
+    //    超出工作區邊界幾個像素，剛好等於縮放邊框的寬度。使用者裝了會佔用螢幕空間的工具
+    //    （工作列本身、或這次遇到的 MyDockFinder 這類第三方 Dock 工具）時，超出的那部分就會
+    //    直接被蓋住看不到。修法是攔截 WM_GETMINMAXINFO 這個訊息，自己用系統回報的「工作區」
+    //    （會扣掉所有登記佔用空間的工具，不只是內建工作列）算出正確的最大化尺寸。
+    private const int DwmwaWindowCornerPreference = 33;
+    private const int DwmwcpRound = 2;
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MonitorInfo lpmi);
+
+    private const uint MonitorDefaultToNearest = 2;
+    private const int WmGetMinMaxInfo = 0x0024;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PointStruct
+    {
+        public int X;
+        public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MinMaxInfo
+    {
+        public PointStruct Reserved;
+        public PointStruct MaxSize;
+        public PointStruct MaxPosition;
+        public PointStruct MinTrackSize;
+        public PointStruct MaxTrackSize;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RectStruct
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    private struct MonitorInfo
+    {
+        public int Size;
+        public RectStruct Monitor;
+        public RectStruct WorkArea;
+        public int Flags;
+    }
 
     private readonly VaultManager _vaultManager;
     private readonly HistoryLogger _historyLogger;
@@ -45,6 +109,13 @@ public partial class MainWindow : Window
         _appDataDir = appDataDir;
         _initialPaths = initialPaths;
 
+        // 啟動時就先套用一次已儲存的主題背景色，不要等使用者到設定頁重新選一次才生效——
+        // 不然重開 App 之後，即使上次選的是深色模式，WebView2 邊緣那圈窄邊還是會先閃一下
+        // 白色，等頁面裡的 JS 執行完才切過去。
+        ApplyWindowBackgroundForTheme(_settings.Theme);
+
+        SourceInitialized += OnSourceInitialized;
+
         Loaded += async (_, _) =>
         {
             await MainWebView.EnsureCoreWebView2Async();
@@ -56,6 +127,17 @@ public partial class MainWindow : Window
             // 2. DevTools 只有 Release 建置才關掉——Debug 建置留著方便自己開發時除錯前端問題。
             MainWebView.CoreWebView2.Settings.IsPasswordAutosaveEnabled = false;
             MainWebView.CoreWebView2.Settings.IsGeneralAutofillEnabled = false;
+            // 桌面應用程式不應該讓使用者用 Ctrl+滾輪或觸控手勢意外縮放畫面（那是瀏覽器的行為，
+            // 這裡不是瀏覽器）。畫面本身在不同 Windows 顯示器縮放比例（100%/125%/150%...）下
+            // 已經會由 WebView2 自動依照系統 DPI 正確縮放，不需要額外的網頁縮放疊加上去。
+            MainWebView.CoreWebView2.Settings.IsZoomControlEnabled = false;
+
+            // 開啟 app-region CSS 支援：HTML 裡標記 app-region: drag 的區域會被當成視窗標題列，
+            // 拖曳、右鍵系統選單、雙擊最大化全部交給作業系統的視窗管理員原生處理。
+            // 這比「用 JavaScript 追游標位置再回頭叫視窗移動」可靠得多——後者每次移動都要跨進程
+            // 來回一次，延遲累積起來視窗就會抖動，而且拿不到 Aero Snap 那些原生行為。
+            // 注意：這個設定必須在導覽之前設定好，下一次導覽才會生效。
+            MainWebView.CoreWebView2.Settings.IsNonClientRegionSupportEnabled = true;
 #if DEBUG
             MainWebView.CoreWebView2.Settings.AreDevToolsEnabled = true;
 #else
@@ -121,12 +203,128 @@ public partial class MainWindow : Window
             MainWebView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
             MainWebView.CoreWebView2.NavigationCompleted += (_, args) =>
             {
-                if (args.IsSuccess && _initialPaths is { Count: > 0 })
+                if (!args.IsSuccess)
+                {
+                    return;
+                }
+
+                // 頁面載入完成先同步一次目前的視窗狀態，前端的最大化按鈕才知道該顯示哪個圖示
+                // （例如上次關閉時是最大化的，這次啟動就要直接顯示「還原」而不是「最大化」）。
+                SendWindowStateToFrontend();
+
+                if (_initialPaths is { Count: > 0 })
                 {
                     SendToFrontend(new { type = "initialPaths", paths = _initialPaths });
                 }
             };
+
+            StateChanged += (_, _) => SendWindowStateToFrontend();
         };
+    }
+
+    /// <summary>
+    /// 視窗邊緣那圈窄邊（見 MainWindow.xaml 的 WebView2 Margin 說明）是純 WPF 畫的，
+    /// 顏色來自 Window.Background，不會自動跟著 HTML 裡的深色模式切換——這裡手動同步一次，
+    /// 顏色數值刻意跟 App.vue 裡 .app--dark 的 --color-surface 對齊，兩邊要一起改。
+    /// </summary>
+    private void ApplyWindowBackgroundForTheme(string theme)
+    {
+        Background = theme == "dark"
+            ? new SolidColorBrush(Color.FromRgb(0x23, 0x24, 0x28))
+            : new SolidColorBrush(Colors.White);
+    }
+
+    /// <summary>
+    /// 視窗控制代碼（HWND）建立完成的時機——這裡才拿得到 HWND，才能掛 WndProc 攔截跟設定
+    /// DWM 屬性。比 Loaded 早，Loaded 是等 WPF 版面配置跑完，這裡只是視窗底層控制代碼剛建好。
+    /// </summary>
+    private void OnSourceInitialized(object? sender, EventArgs e)
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+
+        TryRestoreRoundedCorners(hwnd);
+
+        var source = HwndSource.FromHwnd(hwnd);
+        source?.AddHook(WndProc);
+    }
+
+    private static void TryRestoreRoundedCorners(IntPtr hwnd)
+    {
+        try
+        {
+            var preference = DwmwcpRound;
+            DwmSetWindowAttribute(hwnd, DwmwaWindowCornerPreference, ref preference, sizeof(int));
+        }
+        catch (DllNotFoundException)
+        {
+            // Windows 10 或更舊版本可能沒有這支 DLL／這個屬性，安靜略過，不影響其他功能。
+        }
+    }
+
+    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WmGetMinMaxInfo)
+        {
+            ApplyCorrectMaximizedBounds(hwnd, lParam);
+            handled = true;
+        }
+
+        return IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// 修正無邊框視窗最大化時超出工作區邊界的問題，同時補回最小視窗尺寸限制（見下方說明）。
+    /// 用系統回報的「工作區」（會扣掉工作列、以及任何登記佔用螢幕空間的第三方工具，
+    /// 例如使用者反映的 MyDockFinder）算出正確的最大化位置與尺寸，取代 WPF 內建的計算結果。
+    ///
+    /// 攔截這個訊息、把它標記成已處理之後，WPF 自己原本會把 Window.MinWidth／MinHeight
+    /// 套進 MinTrackSize 欄位的預設邏輯就不會再執行了——這裡漏掉這步會導致視窗完全沒有
+    /// 最小尺寸限制，可以被拖到比視窗控制按鈕還小（這是實測發現的真實 bug，不是假設）。
+    /// 這裡要自己重新算一次，換算時要考慮 DPI 縮放比例，不能直接拿 WPF 的裝置無關單位
+    /// 當成實際像素用，改成非 static 是因為需要存取 this.MinWidth／MinHeight 跟 this 本身
+    /// （VisualTreeHelper.GetDpi 需要一個已經連上畫面的視覺元素）。
+    /// </summary>
+    private void ApplyCorrectMaximizedBounds(IntPtr hwnd, IntPtr lParam)
+    {
+        var mmi = Marshal.PtrToStructure<MinMaxInfo>(lParam);
+
+        var dpi = VisualTreeHelper.GetDpi(this);
+        mmi.MinTrackSize.X = (int)Math.Round(MinWidth * dpi.DpiScaleX);
+        mmi.MinTrackSize.Y = (int)Math.Round(MinHeight * dpi.DpiScaleY);
+
+        var monitor = MonitorFromWindow(hwnd, MonitorDefaultToNearest);
+        if (monitor != IntPtr.Zero)
+        {
+            var monitorInfo = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+            if (GetMonitorInfo(monitor, ref monitorInfo))
+            {
+                var workArea = monitorInfo.WorkArea;
+                var monitorArea = monitorInfo.Monitor;
+
+                // 最大化位置要用「相對於螢幕左上角」的座標，不是相對於工作區本身——這是 Windows API
+                // 的設計方式，容易在這裡搞錯方向導致算出來的位置整個偏掉。
+                mmi.MaxPosition.X = workArea.Left - monitorArea.Left;
+                mmi.MaxPosition.Y = workArea.Top - monitorArea.Top;
+                mmi.MaxSize.X = workArea.Right - workArea.Left;
+                mmi.MaxSize.Y = workArea.Bottom - workArea.Top;
+            }
+        }
+
+        Marshal.StructureToPtr(mmi, lParam, true);
+    }
+
+    /// <summary>
+    /// 把目前是不是最大化狀態告訴前端，讓自訂標題列的按鈕圖示能跟著切換。
+    /// WebView2 還沒初始化完成時直接跳過（例如視窗剛建立就被還原狀態變更觸發）。
+    /// </summary>
+    private void SendWindowStateToFrontend()
+    {
+        if (MainWebView?.CoreWebView2 is null)
+        {
+            return;
+        }
+
+        SendToFrontend(new { type = "windowStateChanged", isMaximized = WindowState == WindowState.Maximized });
     }
 
     /// <summary>
@@ -180,6 +378,26 @@ public partial class MainWindow : Window
 
                 case "decryptBatch":
                     await HandleDecryptBatchRequestAsync(root);
+                    break;
+
+                case "windowMinimize":
+                    WindowState = WindowState.Minimized;
+                    break;
+
+                case "windowMaximizeToggle":
+                    WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+                    break;
+
+                case "windowClose":
+                    Close();
+                    break;
+
+                case "filesDroppedFromWebView":
+                    HandleFilesDroppedFromWebView(e);
+                    break;
+
+                case "getPathSizes":
+                    await HandleGetPathSizesRequestAsync(root);
                     break;
 
                 case "saveRecoveryKeyToFile":
@@ -443,6 +661,39 @@ public partial class MainWindow : Window
     /// <summary>
     /// 對應恢復金鑰顯示畫面的「存成檔案」選項：跳原生存檔對話框，把恢復金鑰文字寫進使用者選的檔案。
     /// </summary>
+    /// <summary>
+    /// 拖放檔案支援：JS 端用 postMessageWithAdditionalObjects 把拖進來的 File 物件連同這則
+    /// 訊息一起送過來，這裡收到的每個物件會是 CoreWebView2File——這是 WebView2 官方專門為了
+    /// 「從拖放進來的網頁 File 物件反查真正磁碟路徑」設計的機制，讀 .Path 屬性就是真正路徑，
+    /// 不是瀏覽器沙盒化、拿不到路徑的一般 File 物件。
+    /// </summary>
+    private void HandleFilesDroppedFromWebView(CoreWebView2WebMessageReceivedEventArgs e)
+    {
+        if (e.AdditionalObjects is null)
+        {
+            return;
+        }
+
+        var paths = new List<string>();
+        foreach (var obj in e.AdditionalObjects)
+        {
+            if (obj is CoreWebView2File file && !string.IsNullOrWhiteSpace(file.Path))
+            {
+                paths.Add(file.Path);
+            }
+        }
+
+        if (paths.Count == 0)
+        {
+            return;
+        }
+
+        Activate();
+        // 拖放是在已經開著的視窗裡追加檔案，使用者可能已經選了一些東西，前端會把這個訊息
+        // 合併進現有清單，不是整份取代（見 App.vue 的 filesDropped 處理）。
+        SendToFrontend(new { type = "filesDropped", paths });
+    }
+
     private void HandleSaveRecoveryKeyToFileRequest(JsonElement request)
     {
         var content = request.GetProperty("content").GetString() ?? "";
@@ -505,6 +756,49 @@ public partial class MainWindow : Window
             passkeyEnabled = metadata?.PasskeyEnabled ?? false,
             recoveryKeyEnabled = metadata?.RecoveryKeyEnabled ?? false
         });
+    }
+
+    /// <summary>
+    /// 純粹給前端「假的進度條」估算時間用——不是真正的加解密進度回報，只是先問一次每個項目
+    /// 的大小跟型別（檔案/資料夾），讓前端可以依大小/數量/型別分類決定進度動畫要跑多久、
+    /// 資料夾項目要不要多顯示一段「壓縮中」的階段。抓不到大小（例如檔案剛好被移走、資料夾
+    /// 存取被拒）就當作 0，這只是體驗用的估算功能，不該讓錯誤影響到後面真正的加密流程能不能跑。
+    /// 資料夾大小用遞迴列舉加總，可能要花一點時間，所以丟到背景執行緒。
+    /// </summary>
+    private async Task HandleGetPathSizesRequestAsync(JsonElement request)
+    {
+        var paths = request.GetProperty("paths").EnumerateArray()
+            .Select(p => p.GetString() ?? "")
+            .ToList();
+
+        var items = await Task.Run(() => paths.Select(GetPathSizeInfoSafe).ToList());
+
+        SendToFrontend(new { type = "pathSizesResult", items });
+    }
+
+    private static object GetPathSizeInfoSafe(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                return new { bytes = new FileInfo(path).Length, isFolder = false };
+            }
+
+            if (Directory.Exists(path))
+            {
+                var totalBytes = new DirectoryInfo(path)
+                    .EnumerateFiles("*", SearchOption.AllDirectories)
+                    .Sum(f => f.Length);
+                return new { bytes = totalBytes, isFolder = true };
+            }
+        }
+        catch (Exception)
+        {
+            // 存取不到（權限、路徑被移走之類）就當作 0，這是估算用的輔助功能，不值得為此中斷。
+        }
+
+        return new { bytes = 0L, isFolder = false };
     }
 
     private void HandleGetSettingsRequest()
@@ -611,6 +905,7 @@ public partial class MainWindow : Window
                 break;
             case "theme":
                 _settings.Theme = value;
+                ApplyWindowBackgroundForTheme(value);
                 break;
             default:
                 return;
