@@ -251,7 +251,24 @@ public sealed class VaultProtocolHandlers
         {
             var entries = _vaultIndexCache.GetItems();
 
-            return entries
+            // 健檢：快取列背後的 metadata 檔案理論上一定存在（正常情況下 FileSystemWatcher 會
+            // 即時同步），但漏接事件的情況下會留下孤兒列——每次刷新清單時用一次便宜的 File.Exists
+            // 檢查（不需要整個 Rebuild() 重新掃描），找到孤兒列就順手清掉，不用等使用者自己發現
+            // 「這筆怎麼點什麼都說找不到紀錄」才想辦法處理。
+            var validEntries = new List<VaultIndexEntry>(entries.Count);
+            foreach (var entry in entries)
+            {
+                if (File.Exists(_vaultManager.GetMetaFilePath(entry.Uuid)))
+                {
+                    validEntries.Add(entry);
+                }
+                else
+                {
+                    _vaultIndexCache.RemoveEntry(entry.Uuid);
+                }
+            }
+
+            return validEntries
                 .AsParallel()
                 .Select(entry =>
                 {
@@ -271,7 +288,23 @@ public sealed class VaultProtocolHandlers
             .Select(entry => new HistoryListItemResponse(entry))
             .ToList();
 
-    public Task<DeleteRecordResult> DeleteRecordAsync(string uuid) => _lockService.TryDeleteRecordAsync(uuid);
+    /// <summary>
+    /// RecordNotFound 代表這筆快取列背後的 metadata 已經不存在（孤兒列，見 ListVaultAsync 的健檢
+    /// 說明）——沒有內容需要保護，直接清掉快取、當成刪除成功處理，不要讓使用者卡在一個永遠
+    /// 刪不掉的殭屍紀錄上。這裡是唯一同時握有 _lockService 跟 _vaultIndexCache 的地方，
+    /// 兩者的協調只適合放在這一層，不該讓 LockService 反過來依賴 VaultIndexCache。
+    /// </summary>
+    public async Task<DeleteRecordResult> DeleteRecordAsync(string uuid)
+    {
+        var result = await _lockService.TryDeleteRecordAsync(uuid);
+        if (!result.Success && result.ErrorCode == ErrorCodes.RecordNotFound)
+        {
+            _vaultIndexCache.RemoveEntry(uuid);
+            return new DeleteRecordResult(true, false);
+        }
+
+        return result;
+    }
 
     public Task<VerifyPasswordResult> VerifyPasswordAsync(string uuid, string password) => _lockService.VerifyPasswordAsync(uuid, password);
 }

@@ -638,7 +638,11 @@ public class LockService
         var metadata = _vault.LoadMetadata(uuid);
         if (metadata is null)
         {
-            return new VerifyPasswordResult(false, "找不到對應的加密紀錄", ErrorCode: ErrorCodes.RecordNotFound);
+            // 這個方法唯一的呼叫端是「永久刪除前的密碼再驗證」——找不到 metadata 代表這筆紀錄
+            // 已經沒有實際內容需要密碼保護，驗證的目的（證明按下刪除的人真的知道密碼）已經不成立，
+            // 視同驗證通過讓使用者可以繼續走到最終確認彈窗，把這筆孤兒快取列清乾淨，而不是卡在
+            // 一個永遠驗證不過的死結裡。
+            return new VerifyPasswordResult(true);
         }
 
         if (_lockout is not null)

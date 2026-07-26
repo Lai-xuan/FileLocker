@@ -145,6 +145,15 @@ public sealed class VaultIndexCache : IDisposable
             return;
         }
 
+        RemoveEntry(uuid);
+    }
+
+    /// <summary>
+    /// 清掉單一一筆快取列，不管背後原因是什麼（FileSystemWatcher 偵測到刪除、或清單頁健檢
+    /// 發現快取列背後的 metadata 其實已經不存在）——兩種情境要做的事完全一樣，共用同一段 SQL。
+    /// </summary>
+    public void RemoveEntry(string uuid)
+    {
         lock (_connectionLock)
         {
             using var command = _connection.CreateCommand();

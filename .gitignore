@@ -1,0 +1,18 @@
+# .NET 建置產物——bin/obj 底下的東西都是每次 dotnet build 就會重新產生的，
+# 不該進版控（也是這個專案目前最大宗的「非原始碼」追蹤檔案，包含 WebView2 的
+# 使用者資料夾，本來就會一直變動，追蹤了也沒有意義）。
+[Bb]in/
+[Oo]bj/
+
+# Visual Studio 本機使用者狀態（.suo、方案快取），每台機器/每個人都不一樣。
+.vs/
+*.user
+*.suo
+
+# npm 依賴與前端建置產物——npm install / npm run build 就能重新產生。
+node_modules/
+dist/
+
+# Rider / VS Code 本機設定，因人而異。
+.idea/
+.vscode/
