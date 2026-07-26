@@ -1,31 +1,18 @@
 {
   "version": 2,
-  "dgSpecHash": "nxT/pkiIuiw=",
+  "dgSpecHash": "ltqVE9f3YZs=",
   "success": true,
   "projectFilePath": "D:\\FileLocker_專案\\FileLocker\\src\\FileLocker.Core\\FileLocker.Core.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\04209\\.nuget\\packages\\konscious.security.cryptography.argon2\\1.3.1\\konscious.security.cryptography.argon2.1.3.1.nupkg.sha512",
     "C:\\Users\\04209\\.nuget\\packages\\konscious.security.cryptography.blake2\\1.1.1\\konscious.security.cryptography.blake2.1.1.1.nupkg.sha512",
-    "C:\\Users\\04209\\.nuget\\packages\\microsoft.data.sqlite\\9.0.0\\microsoft.data.sqlite.9.0.0.nupkg.sha512",
-    "C:\\Users\\04209\\.nuget\\packages\\microsoft.data.sqlite.core\\9.0.0\\microsoft.data.sqlite.core.9.0.0.nupkg.sha512",
-    "C:\\Users\\04209\\.nuget\\packages\\sqlitepclraw.bundle_e_sqlite3\\2.1.10\\sqlitepclraw.bundle_e_sqlite3.2.1.10.nupkg.sha512",
-    "C:\\Users\\04209\\.nuget\\packages\\sqlitepclraw.core\\2.1.10\\sqlitepclraw.core.2.1.10.nupkg.sha512",
-    "C:\\Users\\04209\\.nuget\\packages\\sqlitepclraw.lib.e_sqlite3\\2.1.10\\sqlitepclraw.lib.e_sqlite3.2.1.10.nupkg.sha512",
-    "C:\\Users\\04209\\.nuget\\packages\\sqlitepclraw.provider.e_sqlite3\\2.1.10\\sqlitepclraw.provider.e_sqlite3.2.1.10.nupkg.sha512",
+    "C:\\Users\\04209\\.nuget\\packages\\microsoft.data.sqlite\\10.0.10\\microsoft.data.sqlite.10.0.10.nupkg.sha512",
+    "C:\\Users\\04209\\.nuget\\packages\\microsoft.data.sqlite.core\\10.0.10\\microsoft.data.sqlite.core.10.0.10.nupkg.sha512",
+    "C:\\Users\\04209\\.nuget\\packages\\sqlitepclraw.bundle_e_sqlite3\\2.1.12\\sqlitepclraw.bundle_e_sqlite3.2.1.12.nupkg.sha512",
+    "C:\\Users\\04209\\.nuget\\packages\\sqlitepclraw.core\\2.1.12\\sqlitepclraw.core.2.1.12.nupkg.sha512",
+    "C:\\Users\\04209\\.nuget\\packages\\sqlitepclraw.lib.e_sqlite3\\2.1.12\\sqlitepclraw.lib.e_sqlite3.2.1.12.nupkg.sha512",
+    "C:\\Users\\04209\\.nuget\\packages\\sqlitepclraw.provider.e_sqlite3\\2.1.12\\sqlitepclraw.provider.e_sqlite3.2.1.12.nupkg.sha512",
     "C:\\Users\\04209\\.nuget\\packages\\microsoft.windows.sdk.net.ref\\10.0.19041.57\\microsoft.windows.sdk.net.ref.10.0.19041.57.nupkg.sha512"
   ],
-  "logs": [
-    {
-      "code": "NU1903",
-      "level": "Warning",
-      "message": "套件 'SQLitePCLRaw.lib.e_sqlite3' 2.1.10 具有已知的 高 嚴重性弱點，https://github.com/advisories/GHSA-2m69-gcr7-jv3q。",
-      "projectPath": "D:\\FileLocker_專案\\FileLocker\\src\\FileLocker.Core\\FileLocker.Core.csproj",
-      "warningLevel": 1,
-      "filePath": "D:\\FileLocker_專案\\FileLocker\\src\\FileLocker.Core\\FileLocker.Core.csproj",
-      "libraryId": "SQLitePCLRaw.lib.e_sqlite3",
-      "targetGraphs": [
-        "net10.0-windows10.0.19041.0"
-      ]
-    }
-  ]
+  "logs": []
 }

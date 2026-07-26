@@ -188,43 +188,9 @@ public class LockServiceTests : IDisposable
         Assert.Contains("竄改", unlockResult.ErrorMessage);
     }
 
-    [Fact]
-    public async Task CheckMarkerStatus_ForItemStillAtOriginalLocation_ReturnsFound()
-    {
-        var filePath = Path.Combine(_workDir.FullName, "沒被搬動的檔案.txt");
-        File.WriteAllText(filePath, "內容");
-        var lockResult = await _service.EncryptAsync(filePath, "password", null);
-        var metadata = new VaultManager(_vaultDir.FullName).LoadMetadata(lockResult.Uuid)!;
-
-        var status = _service.CheckMarkerStatus(metadata);
-
-        Assert.True(status.Found);
-        Assert.Equal(lockResult.LockedMarkerPath, status.MarkerPath);
-    }
-
-    [Fact]
-    public async Task CheckMarkerStatus_WhenMarkerFileHasBeenMoved_ReturnsNotFound()
-    {
-        var filePath = Path.Combine(_workDir.FullName, "會被搬走的檔案.txt");
-        File.WriteAllText(filePath, "內容");
-        var lockResult = await _service.EncryptAsync(filePath, "password", null);
-        var metadata = new VaultManager(_vaultDir.FullName).LoadMetadata(lockResult.Uuid)!;
-
-        // 模擬使用者事後把 .locked 檔案搬到別的地方。
-        var elsewhereDir = Directory.CreateTempSubdirectory("FileLockerElsewhere_");
-        try
-        {
-            File.Move(lockResult.LockedMarkerPath, Path.Combine(elsewhereDir.FullName, "會被搬走的檔案.locked"));
-
-            var status = _service.CheckMarkerStatus(metadata);
-
-            Assert.False(status.Found);
-        }
-        finally
-        {
-            elsewhereDir.Delete(recursive: true);
-        }
-    }
+    // CheckMarkerStatus 的測試搬到 MarkerStatusCheckerTests.cs 了——這個查詢邏輯已經從
+    // LockService 分離成獨立的 MarkerStatusChecker（見架構審查 2026-07-26），不再需要透過
+    // LockService 的完整依賴（HistoryLogger／LockoutTracker／VaultManager）才能測試。
 
     [Fact]
     public async Task DecryptByUuidAsync_WithCorrectPassword_RestoresContentAndRemovesExistingMarker()

@@ -332,6 +332,16 @@ const isLoadingList = ref(false)
 // 提示、不強制整包刷新畫面——vaultList 是整包覆蓋（見下面 vaultList 處理），靜默自動刷新
 // 會讓使用者正在互動的項目突然消失或位移，體驗比多一個小提示更糟。
 const vaultListStale = ref(false)
+// 使用者自己在這個視窗做的加密/解密/刪除，事後 VaultChangeWatcher 一定會偵測到對應的
+// .meta.json 變化並推播 vaultChanged——這其實是自己操作的回音，不是真的「有別的地方
+// 動了 Vault」，不該再跳一次「有更新」提示。收到 vaultChanged 時如果離最近一次本機異動
+// 不到這個時間窗，就當作回音略過。2 秒是抓 VaultChangeWatcher 750ms 的全域通知 debounce
+// 加上 IPC 往返的寬鬆估計。
+const LOCAL_MUTATION_ECHO_WINDOW_MS = 2000
+let lastLocalVaultMutationAt = 0
+function markLocalVaultMutation() {
+  lastLocalVaultMutationAt = Date.now()
+}
 const decryptingUuids = ref(new Set())
 const expandedGroups = ref(new Set())
 const decryptingBatchIds = ref(new Set())
@@ -379,221 +389,299 @@ watch(passwordPromptContext, (context) => {
 
 const isRunningInWebView2 = typeof window.chrome?.webview !== 'undefined'
 
-if (isRunningInWebView2) {
-  window.chrome.webview.addEventListener('message', (event) => {
-    const data = event.data
+// 清單頁四種不同的解密結果訊息（單筆／Passkey／恢復金鑰／批次逐項）都要做同一件事：
+// 把成功解密的項目從 vaultItems 篩掉。集中成一個具名函式，之後改「篩掉」的邏輯
+// （例如改成標記狀態、動畫淡出）只需要改一個地方，四個呼叫端都受益。
+function removeVaultItem(uuid) {
+  vaultItems.value = vaultItems.value.filter((item) => item.uuid !== uuid)
+}
 
-    if (data.type === 'encryptBatchStarted') {
-      encryptBatchTotal.value = data.totalCount
-      encryptItemResults.value = []
-    } else if (data.type === 'encryptItemResult') {
-      let note = ''
-      if (data.passkeyRequested && !data.passkeyEnabled) {
-        note = t('note.passkeyNotEnabled')
-      } else if (data.passkeyEnabled) {
-        note = t('note.passkeyEnabled')
-      }
-      encryptItemResults.value.push({
-        path: data.path,
-        success: data.success,
-        errorMessage: translateError(data.errorCode, data.errorDetail, data.errorMessage),
-        note
-      })
-      if (data.recoveryKey) {
-        recoveryKeyDisplay.value = data.recoveryKey
-        recoveryKeySaveState.value = ''
-      }
-    } else if (data.type === 'encryptBatchDone') {
-      isEncrypting.value = false
-      finishFakeProgress()
-      encryptPaths.value = []
-      // 密碼是敏感資料，不管這次成功還是失敗，都不該一直留在欄位裡——失敗的話重新輸入
-      // 一次不是很大的負擔，但讓密碼長時間留在畫面上是不必要的風險。提示文字不算敏感資料，
-      // 但同一批既然結束了，一起清掉、準備接下一批比較乾淨。
-      encryptPassword.value = ''
-      hint.value = ''
-    } else if (data.type === 'decryptResult') {
-      isDecrypting.value = false
-      decryptResultIsError.value = !data.success
-      decryptResultMessage.value = data.success
-        ? t('decrypt.success', { path: data.restoredPath })
-        : translateError(data.errorCode, data.errorDetail, t('decrypt.failed', { error: data.errorMessage }))
-      // 密碼一律清掉。路徑跟「其他解鎖方式」資訊只有失敗時才留著——失敗通常是密碼打錯，
-      // 使用者想對同一個檔案重新輸入密碼，這種情況下路徑欄位跟 Passkey/恢復金鑰按鈕都還有效，
-      // 留著方便直接重試。成功的話這個項目已經解密消失了，路徑跟按鈕都該一起清掉，
-      // 不然會誤導使用者以為還能對一個已經不存在的東西重試。
-      decryptPassword.value = ''
-      if (data.success) {
+// 對應架構審查（2026-07-26）：訊息分派從一長串 if-else 改成 { type: handler } 的對照表——
+// 新增一種訊息類型變成「在這個物件裡加一個 key」，不是「在共用鏈裡插隊」，鏈不會再無限變長。
+// 每個 handler 只做這一種訊息該做的事，彼此互不干擾，順序也不重要。
+const messageHandlers = {
+  encryptBatchStarted(data) {
+    encryptBatchTotal.value = data.totalCount
+    encryptItemResults.value = []
+  },
+
+  encryptItemResult(data) {
+    if (data.success) {
+      markLocalVaultMutation()
+    }
+    let note = ''
+    if (data.passkeyRequested && !data.passkeyEnabled) {
+      note = t('note.passkeyNotEnabled')
+    } else if (data.passkeyEnabled) {
+      note = t('note.passkeyEnabled')
+    }
+    encryptItemResults.value.push({
+      path: data.path,
+      success: data.success,
+      errorMessage: translateError(data.errorCode, data.errorDetail, data.errorMessage),
+      note
+    })
+    if (data.recoveryKey) {
+      recoveryKeyDisplay.value = data.recoveryKey
+      recoveryKeySaveState.value = ''
+    }
+  },
+
+  encryptBatchDone() {
+    isEncrypting.value = false
+    finishFakeProgress()
+    encryptPaths.value = []
+    // 密碼是敏感資料，不管這次成功還是失敗，都不該一直留在欄位裡——失敗的話重新輸入
+    // 一次不是很大的負擔，但讓密碼長時間留在畫面上是不必要的風險。提示文字不算敏感資料，
+    // 但同一批既然結束了，一起清掉、準備接下一批比較乾淨。
+    encryptPassword.value = ''
+    hint.value = ''
+  },
+
+  decryptResult(data) {
+    isDecrypting.value = false
+    decryptResultIsError.value = !data.success
+    decryptResultMessage.value = data.success
+      ? t('decrypt.success', { path: data.restoredPath })
+      : translateError(data.errorCode, data.errorDetail, t('decrypt.failed', { error: data.errorMessage }))
+    // 密碼一律清掉。路徑跟「其他解鎖方式」資訊只有失敗時才留著——失敗通常是密碼打錯，
+    // 使用者想對同一個檔案重新輸入密碼，這種情況下路徑欄位跟 Passkey/恢復金鑰按鈕都還有效，
+    // 留著方便直接重試。成功的話這個項目已經解密消失了，路徑跟按鈕都該一起清掉，
+    // 不然會誤導使用者以為還能對一個已經不存在的東西重試。
+    decryptPassword.value = ''
+    if (data.success) {
+      decryptPath.value = ''
+      decryptItemInfo.value = null
+    }
+  },
+
+  decryptByUuidResult(data) {
+    decryptingUuids.value.delete(data.uuid)
+    if (data.success) {
+      removeVaultItem(data.uuid)
+      markLocalVaultMutation()
+      showToast(t('decrypt.success', { path: data.restoredPath }), 'success')
+    } else {
+      showToast(translateError(data.errorCode, data.errorDetail, t('decrypt.failed', { error: data.errorMessage })))
+    }
+  },
+
+  decryptByPasskeyResult(data) {
+    decryptingUuids.value.delete(data.uuid)
+    if (data.success) {
+      removeVaultItem(data.uuid)
+      markLocalVaultMutation()
+      // 這則訊息是「已加密清單頁」跟「解密頁籤」的 Passkey 按鈕共用的，成功後兩邊各自
+      // 該清掉的殘留資訊都要處理——清單頁清 vaultItems（上面那行），解密頁籤清路徑欄位
+      // 跟「其他解鎖方式」按鈕，只有這次成功的項目剛好就是解密頁籤正在顯示的那個才清，
+      // 用 uuid 比對確保不會誤清到不相關的狀態。
+      if (decryptItemInfo.value?.uuid === data.uuid) {
         decryptPath.value = ''
         decryptItemInfo.value = null
       }
-    } else if (data.type === 'decryptByUuidResult') {
-      decryptingUuids.value.delete(data.uuid)
-      if (data.success) {
-        vaultItems.value = vaultItems.value.filter((item) => item.uuid !== data.uuid)
-        showToast(t('decrypt.success', { path: data.restoredPath }), 'success')
-      } else {
-        showToast(translateError(data.errorCode, data.errorDetail, t('decrypt.failed', { error: data.errorMessage })))
-      }
-    } else if (data.type === 'decryptByPasskeyResult') {
-      decryptingUuids.value.delete(data.uuid)
-      if (data.success) {
-        vaultItems.value = vaultItems.value.filter((item) => item.uuid !== data.uuid)
-        // 這則訊息是「已加密清單頁」跟「解密頁籤」的 Passkey 按鈕共用的，成功後兩邊各自
-        // 該清掉的殘留資訊都要處理——清單頁清 vaultItems（上面那行），解密頁籤清路徑欄位
-        // 跟「其他解鎖方式」按鈕，只有這次成功的項目剛好就是解密頁籤正在顯示的那個才清，
-        // 用 uuid 比對確保不會誤清到不相關的狀態。
-        if (decryptItemInfo.value?.uuid === data.uuid) {
-          decryptPath.value = ''
-          decryptItemInfo.value = null
-        }
-        showToast(t('alert.passkeyDecryptSuccess', { path: data.restoredPath }), 'success')
-      } else {
-        showToast(translateError(data.errorCode, data.errorDetail, t('alert.passkeyDecryptFailed', { error: data.errorMessage })))
-      }
-    } else if (data.type === 'decryptByRecoveryKeyResult') {
-      decryptingUuids.value.delete(data.uuid)
-      if (data.success) {
-        vaultItems.value = vaultItems.value.filter((item) => item.uuid !== data.uuid)
-        if (decryptItemInfo.value?.uuid === data.uuid) {
-          decryptPath.value = ''
-          decryptItemInfo.value = null
-        }
-        showToast(t('alert.recoveryKeyDecryptSuccess', { path: data.restoredPath }), 'success')
-      } else {
-        showToast(translateError(data.errorCode, data.errorDetail, t('alert.recoveryKeyDecryptFailed', { error: data.errorMessage })))
-      }
-    } else if (data.type === 'decryptBatchStarted') {
-      // totalCount 目前先不用另外存，逐項回報時直接從 vaultItems 篩掉即可。
-    } else if (data.type === 'decryptBatchItemResult') {
-      if (data.success) {
-        vaultItems.value = vaultItems.value.filter((item) => item.uuid !== data.uuid)
-      }
-    } else if (data.type === 'decryptBatchDone') {
-      // 找出這批是哪個 batchId（此時對應項目如果全部成功，vaultItems 裡已經不會再有它們了）。
-      for (const batchId of decryptingBatchIds.value) {
-        const stillHasItems = vaultItems.value.some((item) => item.batchId === batchId)
-        if (!stillHasItems) {
-          decryptingBatchIds.value.delete(batchId)
-        }
-      }
-      decryptingBatchIds.value.clear()
-      if (data.successCount < data.totalCount) {
-        showToast(t('alert.batchUnlockPartial', { success: data.successCount, total: data.totalCount }))
-      }
-    } else if (data.type === 'pathSizesResult') {
-      pathSizesResolve?.(data.items)
-      pathSizesResolve = null
-    } else if (data.type === 'saveRecoveryKeyToFileResult') {
-      if (data.success) {
-        recoveryKeySaveState.value = 'saved'
-      } else if (!data.cancelled) {
-        showToast(t('alert.saveFileFailed', { error: data.errorMessage }))
-      }
-    } else if (data.type === 'inspectLockedFileResult') {
-      decryptItemInfo.value = data.success
-        ? { uuid: data.uuid, originalName: data.originalName, hint: data.hint, passkeyEnabled: data.passkeyEnabled, recoveryKeyEnabled: data.recoveryKeyEnabled }
-        : null
-    } else if (data.type === 'error') {
-      isEncrypting.value = false
-      cancelFakeProgress()
-      encryptProgressPercent.value = 0
-      isDecrypting.value = false
-      isLoadingList.value = false
-      isLoadingHistory.value = false
-      encryptItemResults.value.push({ path: '', success: false, errorMessage: t('alert.genericError', { message: data.message }), note: '' })
-    } else if (data.type === 'pathPicked') {
-      if (data.purpose === 'decryptPath') {
-        decryptPath.value = data.path
+      showToast(t('alert.passkeyDecryptSuccess', { path: data.restoredPath }), 'success')
+    } else {
+      showToast(translateError(data.errorCode, data.errorDetail, t('alert.passkeyDecryptFailed', { error: data.errorMessage })))
+    }
+  },
+
+  decryptByRecoveryKeyResult(data) {
+    decryptingUuids.value.delete(data.uuid)
+    if (data.success) {
+      removeVaultItem(data.uuid)
+      markLocalVaultMutation()
+      if (decryptItemInfo.value?.uuid === data.uuid) {
+        decryptPath.value = ''
         decryptItemInfo.value = null
-        window.chrome.webview.postMessage({ type: 'inspectLockedFile', path: data.path })
-      } else if (data.purpose === 'decryptDestination') {
-        const item = pendingDecryptItem.value
-        const mode = pendingDecryptMode.value
-        pendingDecryptItem.value = null
-        if (item) {
-          if (mode === 'passkey') {
-            startPasskeyDecrypt(item, data.path)
-          } else if (mode === 'recoveryKey') {
-            openRecoveryKeyPrompt(item, data.path)
-          } else {
-            promptPasswordAndDecrypt(item, data.path)
-          }
-        }
-      } else if (data.purpose === 'vaultFolder') {
-        isChangingVaultPath.value = true
-        window.chrome.webview.postMessage({ type: 'changeVaultPath', newPath: data.path })
-      } else {
-        // 資料夾選擇（單選）走這裡，加到清單裡而不是取代整份清單。
-        if (!encryptPaths.value.includes(data.path)) {
-          encryptPaths.value.push(data.path)
-        }
       }
-    } else if (data.type === 'pathsPicked') {
-      // 加密頁籤的「選擇檔案」允許多選，選完的路徑合併進現有清單（去除重複）。
-      for (const path of data.paths) {
-        if (!encryptPaths.value.includes(path)) {
-          encryptPaths.value.push(path)
-        }
-      }
-    } else if (data.type === 'vaultList') {
-      applyAfterMinSkeletonDuration(listLoadStartedAt, () => {
-        isLoadingList.value = false
-        vaultItems.value = data.items
-      })
-    } else if (data.type === 'vaultChanged') {
-      // 使用者不在清單頁的話什麼都不用做——之後切換分頁時，既有的 watch(activeTab)/
-      // watch(activeListSubTab) 邏輯自然會呼叫 refreshList() 拿到最新資料。
-      if (activeTab.value === 'list' && activeListSubTab.value === 'files') {
-        vaultListStale.value = true
-      }
-    } else if (data.type === 'historyList') {
-      applyAfterMinSkeletonDuration(historyLoadStartedAt, () => {
-        isLoadingHistory.value = false
-        historyItems.value = data.items
-      })
-    } else if (data.type === 'deleteRecordResult') {
-      handleDeleteRecordResult(data)
-    } else if (data.type === 'pathPickCancelled') {
-      // 使用者在「自己選地方存」流程中途按了取消，把暫存的項目清掉，避免下次選檔誤觸發解密。
-      if (data.purpose === 'decryptDestination') {
-        pendingDecryptItem.value = null
-      }
-    } else if (data.type === 'settingsResult') {
-      settingsVaultPath.value = data.vaultPath
-      settingsLanguage.value = data.language
-      currentLocale.value = data.language
-      settingsTheme.value = data.theme
-    } else if (data.type === 'changeVaultPathResult') {
-      isChangingVaultPath.value = false
-      if (data.success) {
-        settingsVaultPath.value = data.newPath
-        settingsSaveMessage.value = t('settings.vaultMoveSuccess')
-      } else {
-        showToast(t('settings.vaultMoveFailed', { error: data.errorMessage }))
-      }
-    } else if (data.type === 'updateSettingResult') {
-      settingsSaveMessage.value = t('settings.saved')
-      setTimeout(() => { settingsSaveMessage.value = '' }, 2000)
-    } else if (data.type === 'windowStateChanged') {
-      isWindowMaximized.value = data.isMaximized
-    } else if (data.type === 'filesDropped') {
-      // 拖放進來的檔案：合併進現有清單（去除重複），不是整份取代——使用者可能已經選了
-      // 一些東西，拖放應該是「再加一些」，不是「重新開始」。這則訊息現在來自
-      // HandleFilesDroppedFromWebView（見 handleFileDrop 函式），不是原生 WPF 拖放。
-      activeTab.value = 'encrypt'
-      for (const path of data.paths) {
-        if (!encryptPaths.value.includes(path)) {
-          encryptPaths.value.push(path)
-        }
-      }
-    } else if (data.type === 'initialPaths') {
-      // 從 Shell Extension 右鍵選單過來的路徑清單，切到加密頁籤、整份清單都帶進去。
-      activeTab.value = 'encrypt'
-      if (data.paths && data.paths.length > 0) {
-        encryptPaths.value = [...data.paths]
+      showToast(t('alert.recoveryKeyDecryptSuccess', { path: data.restoredPath }), 'success')
+    } else {
+      showToast(translateError(data.errorCode, data.errorDetail, t('alert.recoveryKeyDecryptFailed', { error: data.errorMessage })))
+    }
+  },
+
+  decryptBatchStarted() {
+    // totalCount 目前先不用另外存，逐項回報時直接從 vaultItems 篩掉即可。
+  },
+
+  decryptBatchItemResult(data) {
+    if (data.success) {
+      removeVaultItem(data.uuid)
+      markLocalVaultMutation()
+    }
+  },
+
+  decryptBatchDone(data) {
+    // 找出這批是哪個 batchId（此時對應項目如果全部成功，vaultItems 裡已經不會再有它們了）。
+    for (const batchId of decryptingBatchIds.value) {
+      const stillHasItems = vaultItems.value.some((item) => item.batchId === batchId)
+      if (!stillHasItems) {
+        decryptingBatchIds.value.delete(batchId)
       }
     }
+    decryptingBatchIds.value.clear()
+    if (data.successCount < data.totalCount) {
+      showToast(t('alert.batchUnlockPartial', { success: data.successCount, total: data.totalCount }))
+    }
+  },
+
+  pathSizesResult(data) {
+    pathSizesResolve?.(data.items)
+    pathSizesResolve = null
+  },
+
+  saveRecoveryKeyToFileResult(data) {
+    if (data.success) {
+      recoveryKeySaveState.value = 'saved'
+    } else if (!data.cancelled) {
+      showToast(t('alert.saveFileFailed', { error: data.errorMessage }))
+    }
+  },
+
+  inspectLockedFileResult(data) {
+    decryptItemInfo.value = data.success
+      ? { uuid: data.uuid, originalName: data.originalName, hint: data.hint, passkeyEnabled: data.passkeyEnabled, recoveryKeyEnabled: data.recoveryKeyEnabled }
+      : null
+  },
+
+  error(data) {
+    isEncrypting.value = false
+    cancelFakeProgress()
+    encryptProgressPercent.value = 0
+    isDecrypting.value = false
+    isLoadingList.value = false
+    isLoadingHistory.value = false
+    encryptItemResults.value.push({ path: '', success: false, errorMessage: t('alert.genericError', { message: data.message }), note: '' })
+  },
+
+  pathPicked(data) {
+    if (data.purpose === 'decryptPath') {
+      decryptPath.value = data.path
+      decryptItemInfo.value = null
+      window.chrome.webview.postMessage({ type: 'inspectLockedFile', path: data.path })
+    } else if (data.purpose === 'decryptDestination') {
+      const item = pendingDecryptItem.value
+      const mode = pendingDecryptMode.value
+      pendingDecryptItem.value = null
+      if (item) {
+        if (mode === 'passkey') {
+          startPasskeyDecrypt(item, data.path)
+        } else if (mode === 'recoveryKey') {
+          openRecoveryKeyPrompt(item, data.path)
+        } else {
+          promptPasswordAndDecrypt(item, data.path)
+        }
+      }
+    } else if (data.purpose === 'vaultFolder') {
+      isChangingVaultPath.value = true
+      window.chrome.webview.postMessage({ type: 'changeVaultPath', newPath: data.path })
+    } else {
+      // 資料夾選擇（單選）走這裡，加到清單裡而不是取代整份清單。
+      if (!encryptPaths.value.includes(data.path)) {
+        encryptPaths.value.push(data.path)
+      }
+    }
+  },
+
+  pathsPicked(data) {
+    // 加密頁籤的「選擇檔案」允許多選，選完的路徑合併進現有清單（去除重複）。
+    for (const path of data.paths) {
+      if (!encryptPaths.value.includes(path)) {
+        encryptPaths.value.push(path)
+      }
+    }
+  },
+
+  vaultList(data) {
+    applyAfterMinSkeletonDuration(listLoadStartedAt, () => {
+      isLoadingList.value = false
+      vaultItems.value = data.items
+    })
+  },
+
+  vaultChanged() {
+    // 剛剛才在這個視窗裡自己做過加密/解密/刪除，這則推播十之八九是那個操作的回音
+    // （watcher 偵測到自己剛寫入/刪除的 .meta.json），略過、不要再叫使用者去刷新一個
+    // 其實已經是最新狀態的畫面。
+    if (Date.now() - lastLocalVaultMutationAt < LOCAL_MUTATION_ECHO_WINDOW_MS) {
+      return
+    }
+    // 使用者不在清單頁的話什麼都不用做——之後切換分頁時，既有的 watch(activeTab)/
+    // watch(activeListSubTab) 邏輯自然會呼叫 refreshList() 拿到最新資料。
+    if (activeTab.value === 'list' && activeListSubTab.value === 'files') {
+      vaultListStale.value = true
+    }
+  },
+
+  historyList(data) {
+    applyAfterMinSkeletonDuration(historyLoadStartedAt, () => {
+      isLoadingHistory.value = false
+      historyItems.value = data.items
+    })
+  },
+
+  deleteRecordResult(data) {
+    handleDeleteRecordResult(data)
+  },
+
+  pathPickCancelled(data) {
+    // 使用者在「自己選地方存」流程中途按了取消，把暫存的項目清掉，避免下次選檔誤觸發解密。
+    if (data.purpose === 'decryptDestination') {
+      pendingDecryptItem.value = null
+    }
+  },
+
+  settingsResult(data) {
+    settingsVaultPath.value = data.vaultPath
+    settingsLanguage.value = data.language
+    currentLocale.value = data.language
+    settingsTheme.value = data.theme
+  },
+
+  changeVaultPathResult(data) {
+    isChangingVaultPath.value = false
+    if (data.success) {
+      settingsVaultPath.value = data.newPath
+      settingsSaveMessage.value = t('settings.vaultMoveSuccess')
+    } else {
+      showToast(t('settings.vaultMoveFailed', { error: data.errorMessage }))
+    }
+  },
+
+  updateSettingResult() {
+    settingsSaveMessage.value = t('settings.saved')
+    setTimeout(() => { settingsSaveMessage.value = '' }, 2000)
+  },
+
+  windowStateChanged(data) {
+    isWindowMaximized.value = data.isMaximized
+  },
+
+  filesDropped(data) {
+    // 拖放進來的檔案：合併進現有清單（去除重複），不是整份取代——使用者可能已經選了
+    // 一些東西，拖放應該是「再加一些」，不是「重新開始」。這則訊息現在來自
+    // HandleFilesDroppedFromWebView（見 handleFileDrop 函式），不是原生 WPF 拖放。
+    activeTab.value = 'encrypt'
+    for (const path of data.paths) {
+      if (!encryptPaths.value.includes(path)) {
+        encryptPaths.value.push(path)
+      }
+    }
+  },
+
+  initialPaths(data) {
+    // 從 Shell Extension 右鍵選單過來的路徑清單，切到加密頁籤、整份清單都帶進去。
+    activeTab.value = 'encrypt'
+    if (data.paths && data.paths.length > 0) {
+      encryptPaths.value = [...data.paths]
+    }
+  }
+}
+
+if (isRunningInWebView2) {
+  window.chrome.webview.addEventListener('message', (event) => {
+    const data = event.data
+    messageHandlers[data.type]?.(data)
   })
 
   // 監聽器掛好之後才要一次設定值（尤其是語言），不要等到使用者自己點進「設定」頁籤才套用——
@@ -986,6 +1074,7 @@ async function requestDelete(item) {
 function handleDeleteRecordResult(data) {
   if (data.success) {
     vaultItems.value = vaultItems.value.filter((item) => item.uuid !== data.uuid)
+    markLocalVaultMutation()
     return
   }
   if (data.blockedByNestedLocks) {
@@ -1161,7 +1250,7 @@ function historyDetailText(entry) {
           </button>
 
           <div v-if="isEncrypting" class="progress-bar" role="progressbar" :aria-valuenow="Math.round(encryptProgressPercent)" aria-valuemin="0" aria-valuemax="100">
-            <div class="progress-bar__fill" :style="{ width: encryptProgressPercent + '%' }"></div>
+            <div class="progress-bar__fill" :style="{ transform: `scaleX(${encryptProgressPercent / 100})` }"></div>
           </div>
 
           <TransitionGroup name="result-row" tag="div" class="result-list">
@@ -2063,7 +2152,7 @@ textarea.text-input {
   box-shadow: var(--shadow-md);
   opacity: 0;
   pointer-events: none;
-  transition: opacity var(--duration-fast) ease, transform var(--duration-fast) ease;
+  transition: opacity var(--duration-fast) var(--ease-out), transform var(--duration-fast) var(--ease-out);
   z-index: 20;
   text-align: left;
   line-break: strict;
@@ -2325,10 +2414,12 @@ textarea.text-input {
 }
 
 .progress-bar__fill {
+  width: 100%;
   height: 100%;
   background: var(--color-accent);
   border-radius: 2px;
-  transition: width 80ms linear;
+  transform-origin: left;
+  transition: transform 80ms linear;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2435,7 +2526,8 @@ textarea.text-input {
 }
 
 .update-banner {
-  display: inline-flex;
+  display: flex;
+  width: fit-content;
   align-items: center;
   gap: 0.4rem;
   margin-bottom: 0.75rem;
@@ -2737,6 +2829,12 @@ textarea.text-input {
   transform: translateX(16px) scale(0.97);
 }
 
+/* TransitionGroup 的 FLIP 重新定位：沒有這條規則的話，移除一則 toast 時其他還留著的
+   toast 會瞬間跳到新位置，而不是平滑滑過去。 */
+.toast-move {
+  transition: transform var(--duration-base) var(--ease-out);
+}
+
 /* ---- 彈窗（含確認對話框） ---- */
 .modal-overlay {
   position: fixed;
@@ -2747,7 +2845,7 @@ textarea.text-input {
   justify-content: center;
   padding: 1.5rem;
   z-index: 100;
-  transition: opacity var(--duration-base) ease;
+  transition: opacity var(--duration-base) var(--ease-out);
 }
 
 .modal {

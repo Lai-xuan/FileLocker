@@ -24,6 +24,15 @@ public sealed class VaultIndexCache : IDisposable
     private readonly string _dbPath;
     private readonly SqliteConnection _connection;
 
+    // VaultChangeWatcher 的 debounce 是「每個檔案各自一個 Timer」，好幾個檔案同時安靜下來時，
+    // 各自的 Timer 回呼會在執行緒集區的不同執行緒上並行觸發，全部共用同一個 SqliteConnection——
+    // Microsoft.Data.Sqlite 的 SqliteConnection 不是執行緒安全的，沒有這道鎖時，兩個執行緒同時
+    // 建立/釋放 SqliteCommand 會弄亂連線內部的命令清單，實測會直接讓行程當掉（不是丟例外，是
+    // crash）。這裡用一個簡單的鎖序列化所有存取，用量規模（本機、單一使用者）用不到更複雜的
+    // 做法（例如每執行緒各自開一條連線）。lock 是可重入的，Rebuild() 從其他已經持有鎖的方法
+    // 內部被呼叫（例如 OnMetaFileChanged 偵測到非正規檔名時）不會死鎖。
+    private readonly object _connectionLock = new();
+
     /// <summary>
     /// cacheDirectory 底下的實際檔名是 Vault 路徑正規化後的雜湊值——同一個 Vault 路徑每次
     /// 啟動都會對到同一份快取檔（不用每次重建），換了 Vault 路徑（設定頁搬移）自然對到一份
@@ -45,31 +54,34 @@ public sealed class VaultIndexCache : IDisposable
     /// <summary>直接讀 SQLite，不碰 Vault 資料夾的檔案系統——這是這個類別存在的意義。</summary>
     public IReadOnlyList<VaultIndexEntry> GetItems()
     {
-        var results = new List<VaultIndexEntry>();
-
-        using var command = _connection.CreateCommand();
-        command.CommandText =
-            "SELECT Uuid, OriginalName, OriginalPath, Type, PasskeyEnabled, RecoveryKeyEnabled, " +
-            "BatchId, OriginalSizeBytes, Hint, CreatedAtUtc, NestedLockCount FROM VaultItems";
-
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
+        lock (_connectionLock)
         {
-            results.Add(new VaultIndexEntry(
-                Uuid: reader.GetString(0),
-                OriginalName: reader.GetString(1),
-                OriginalPath: reader.GetString(2),
-                Type: Enum.Parse<ItemType>(reader.GetString(3)),
-                PasskeyEnabled: reader.GetInt64(4) != 0,
-                RecoveryKeyEnabled: reader.GetInt64(5) != 0,
-                BatchId: reader.IsDBNull(6) ? null : reader.GetString(6),
-                OriginalSizeBytes: reader.GetInt64(7),
-                Hint: reader.IsDBNull(8) ? null : reader.GetString(8),
-                CreatedAtUtc: DateTimeOffset.Parse(reader.GetString(9), null, DateTimeStyles.RoundtripKind),
-                NestedLockCount: (int)reader.GetInt64(10)));
-        }
+            var results = new List<VaultIndexEntry>();
 
-        return results;
+            using var command = _connection.CreateCommand();
+            command.CommandText =
+                "SELECT Uuid, OriginalName, OriginalPath, Type, PasskeyEnabled, RecoveryKeyEnabled, " +
+                "BatchId, OriginalSizeBytes, Hint, CreatedAtUtc, NestedLockCount FROM VaultItems";
+
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(new VaultIndexEntry(
+                    Uuid: reader.GetString(0),
+                    OriginalName: reader.GetString(1),
+                    OriginalPath: reader.GetString(2),
+                    Type: Enum.Parse<ItemType>(reader.GetString(3)),
+                    PasskeyEnabled: reader.GetInt64(4) != 0,
+                    RecoveryKeyEnabled: reader.GetInt64(5) != 0,
+                    BatchId: reader.IsDBNull(6) ? null : reader.GetString(6),
+                    OriginalSizeBytes: reader.GetInt64(7),
+                    Hint: reader.IsDBNull(8) ? null : reader.GetString(8),
+                    CreatedAtUtc: DateTimeOffset.Parse(reader.GetString(9), null, DateTimeStyles.RoundtripKind),
+                    NestedLockCount: (int)reader.GetInt64(10)));
+            }
+
+            return results;
+        }
     }
 
     /// <summary>
@@ -78,7 +90,13 @@ public sealed class VaultIndexCache : IDisposable
     /// 或事件緩衝區溢位時的保底復原——這些情況都不值得花力氣猜測該怎麼增量處理，
     /// 全部重掃一次最簡單也最不容易出錯。
     /// </summary>
-    public void Rebuild() => RebuildInternal(_connection);
+    public void Rebuild()
+    {
+        lock (_connectionLock)
+        {
+            RebuildInternal(_connection);
+        }
+    }
 
     /// <summary>FileSystemWatcher 偵測到 {uuid}.meta.json 新增或內容變更時呼叫。</summary>
     public void OnMetaFileChanged(string metaFilePath)
@@ -111,7 +129,10 @@ public sealed class VaultIndexCache : IDisposable
             return;
         }
 
-        UpsertIfNewer(uuid, metadata, lastWriteUtc);
+        lock (_connectionLock)
+        {
+            UpsertIfNewer(uuid, metadata, lastWriteUtc);
+        }
     }
 
     /// <summary>FileSystemWatcher 偵測到 {uuid}.meta.json 已經不存在時呼叫。</summary>
@@ -124,10 +145,13 @@ public sealed class VaultIndexCache : IDisposable
             return;
         }
 
-        using var command = _connection.CreateCommand();
-        command.CommandText = "DELETE FROM VaultItems WHERE Uuid = $uuid";
-        command.Parameters.AddWithValue("$uuid", uuid);
-        command.ExecuteNonQuery();
+        lock (_connectionLock)
+        {
+            using var command = _connection.CreateCommand();
+            command.CommandText = "DELETE FROM VaultItems WHERE Uuid = $uuid";
+            command.Parameters.AddWithValue("$uuid", uuid);
+            command.ExecuteNonQuery();
+        }
     }
 
     public void Dispose()
@@ -284,7 +308,7 @@ public sealed class VaultIndexCache : IDisposable
 
     private DateTime GetMetaFileLastWriteUtc(string uuid)
     {
-        var canonicalPath = Path.Combine(_vaultManager.VaultPath, $"{uuid}.meta.json");
+        var canonicalPath = _vaultManager.GetMetaFilePath(uuid);
 
         // 正規檔名理論上一定存在（剛從 ScanAll() 掃出來的項目）；如果剛好是靠衝突副本檔名
         // 贏得去重判斷的極罕見情況，退回 DateTime.MinValue——之後任何觸碰到那個衝突副本

@@ -6,6 +6,7 @@ using System.Windows.Media;
 using System.Windows.Interop;
 using FileLocker.Core;
 using FileLocker.Core.History;
+using FileLocker.Core.Protocol;
 using FileLocker.Core.Settings;
 using FileLocker.Core.Vault;
 using Microsoft.Web.WebView2.Core;
@@ -80,14 +81,13 @@ public partial class MainWindow : Window
         public int Flags;
     }
 
-    private readonly VaultManager _vaultManager;
-    private readonly HistoryLogger _historyLogger;
-    private readonly LockService _lockService;
-    private readonly AppSettingsManager _settingsManager;
+    // VaultManager／HistoryLogger／LockService／AppSettingsManager／VaultIndexCache 不再各自存成
+    // 欄位——除了組出 _protocolHandlers 跟訂閱 _vaultChangeWatcher.Changed，MainWindow 本身不直接
+    // 呼叫任何一個，全部透過協定分派層存取（見架構審查 2026-07-26：MainWindow 不該同時身兼視窗
+    // 平台細節、WebView2 初始化、跟業務邏輯呼叫這三種不相關的職責）。
     private readonly AppSettings _settings;
-    private readonly string _appDataDir;
-    private readonly VaultIndexCache _vaultIndexCache;
     private readonly VaultChangeWatcher _vaultChangeWatcher;
+    private readonly VaultProtocolHandlers _protocolHandlers;
     private readonly List<string>? _initialPaths;
 
     /// <summary>
@@ -104,15 +104,14 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
-        _vaultManager = vaultManager;
-        _historyLogger = historyLogger;
-        _lockService = lockService;
-        _settingsManager = settingsManager;
         _settings = settings;
-        _appDataDir = appDataDir;
-        _vaultIndexCache = vaultIndexCache;
         _vaultChangeWatcher = vaultChangeWatcher;
         _initialPaths = initialPaths;
+
+        // 協定分派層（見架構審查 2026-07-26）：純 C#、不依賴 WPF/WebView2，直接組裝既有的
+        // Core 依賴即可，不需要 App.xaml.cs 額外建立、也不改動它呼叫 MainWindow 建構子的簽章。
+        _protocolHandlers = new VaultProtocolHandlers(
+            vaultManager, lockService, vaultIndexCache, historyLogger, settingsManager, settings);
 
         // Watcher 偵測到 Vault 變化（背景執行緒觸發）時，推播一則通知給前端清單頁——
         // 沿用既有的「背景推送資料進已開啟視窗」模式（見 ApplyIncomingPaths）。
@@ -479,42 +478,39 @@ public partial class MainWindow : Window
         var enablePasskey = request.TryGetProperty("enablePasskey", out var passkeyProp) && passkeyProp.GetBoolean();
         var enableRecoveryKey = request.TryGetProperty("enableRecoveryKey", out var recoveryProp) && recoveryProp.GetBoolean();
 
+        // 視窗控制代碼是 WPF 平台細節，只有這裡（呼叫端）拿得到，往下傳給協定分派層當一般參數，
+        // 那一層不需要知道「視窗」這個概念存在。
         var ownerWindowHandle = enablePasskey ? new WindowInteropHelper(this).Handle : IntPtr.Zero;
-
-        // 選了不只一個項目才需要分組——單一項目沒有「摺疊」的意義，維持 batchId = null。
-        var batchId = paths.Count > 1 ? Guid.NewGuid().ToString() : null;
 
         SendToFrontend(new { type = "encryptBatchStarted", totalCount = paths.Count });
 
         var successCount = 0;
 
-        foreach (var path in paths)
+        // 每完成一個項目就馬上回報，前端可以即時更新清單，不用等全部跑完才看到結果——
+        // 這裡只負責「收到一筆就送一次 WebView2 訊息」，逐項的業務邏輯在 EncryptBatchAsync 裡。
+        await foreach (var item in _protocolHandlers.EncryptBatchAsync(
+            paths, password, hint, enablePasskey, enableRecoveryKey, ownerWindowHandle))
         {
-            var result = await _lockService.EncryptAsync(
-                path, password, string.IsNullOrWhiteSpace(hint) ? null : hint,
-                enablePasskey, ownerWindowHandle, enableRecoveryKey, batchId);
-
-            var actuallyPasskeyEnabled = false;
-            if (result.Success)
+            if (item.Success)
             {
                 successCount++;
-                actuallyPasskeyEnabled = _vaultManager.LoadMetadata(result.Uuid)?.PasskeyEnabled ?? false;
             }
 
-            // 每完成一個項目就馬上回報，前端可以即時更新清單，不用等全部跑完才看到結果。
+            // 前端讀的是攤平的欄位（data.path／data.success／...），不是巢狀的 data.item.xxx，
+            // 這裡要攤平回去，維持既有的線上協定格式不變。
             SendToFrontend(new
             {
                 type = "encryptItemResult",
-                path,
-                success = result.Success,
-                uuid = result.Uuid,
-                lockedMarkerPath = result.LockedMarkerPath,
-                errorMessage = result.ErrorMessage,
-                errorCode = result.ErrorCode,
-                errorDetail = result.ErrorDetail,
-                passkeyRequested = enablePasskey,
-                passkeyEnabled = actuallyPasskeyEnabled,
-                recoveryKey = result.RecoveryKey
+                item.Path,
+                item.Success,
+                item.Uuid,
+                item.LockedMarkerPath,
+                item.ErrorMessage,
+                item.ErrorCode,
+                item.ErrorDetail,
+                item.PasskeyRequested,
+                item.PasskeyEnabled,
+                item.RecoveryKey
             });
         }
 
@@ -526,16 +522,16 @@ public partial class MainWindow : Window
         var lockedMarkerPath = request.GetProperty("path").GetString() ?? "";
         var password = request.GetProperty("password").GetString() ?? "";
 
-        var result = await _lockService.DecryptAsync(lockedMarkerPath, password);
+        var result = await _protocolHandlers.DecryptAsync(lockedMarkerPath, password);
 
         SendToFrontend(new
         {
             type = "decryptResult",
-            success = result.Success,
-            restoredPath = result.RestoredPath,
-            errorMessage = result.ErrorMessage,
-            errorCode = result.ErrorCode,
-            errorDetail = result.ErrorDetail
+            result.Success,
+            result.RestoredPath,
+            result.ErrorMessage,
+            result.ErrorCode,
+            result.ErrorDetail
         });
     }
 
@@ -550,17 +546,17 @@ public partial class MainWindow : Window
             ? destProp.GetString()
             : null;
 
-        var result = await _lockService.DecryptByUuidAsync(uuid, password, destinationDir);
+        var result = await _protocolHandlers.DecryptByUuidAsync(uuid, password, destinationDir);
 
         SendToFrontend(new
         {
             type = "decryptByUuidResult",
             uuid,
-            success = result.Success,
-            restoredPath = result.RestoredPath,
-            errorMessage = result.ErrorMessage,
-            errorCode = result.ErrorCode,
-            errorDetail = result.ErrorDetail
+            result.Success,
+            result.RestoredPath,
+            result.ErrorMessage,
+            result.ErrorCode,
+            result.ErrorDetail
         });
     }
 
@@ -568,20 +564,20 @@ public partial class MainWindow : Window
     private async Task HandleDecryptByPasskeyRequestAsync(JsonElement request)
     {
         var uuid = request.GetProperty("uuid").GetString() ?? "";
-        var destinationDir = ResolveDestinationDirFromRequest(request);
+        var destinationDir = VaultProtocolHandlers.ResolveDestinationDirFromRequest(request);
 
         var hwnd = new WindowInteropHelper(this).Handle;
-        var result = await _lockService.DecryptByPasskeyAsync(uuid, hwnd, destinationDir);
+        var result = await _protocolHandlers.DecryptByPasskeyAsync(uuid, hwnd, destinationDir);
 
         SendToFrontend(new
         {
             type = "decryptByPasskeyResult",
             uuid,
-            success = result.Success,
-            restoredPath = result.RestoredPath,
-            errorMessage = result.ErrorMessage,
-            errorCode = result.ErrorCode,
-            errorDetail = result.ErrorDetail
+            result.Success,
+            result.RestoredPath,
+            result.ErrorMessage,
+            result.ErrorCode,
+            result.ErrorDetail
         });
     }
 
@@ -590,19 +586,19 @@ public partial class MainWindow : Window
     {
         var uuid = request.GetProperty("uuid").GetString() ?? "";
         var recoveryKeyInput = request.GetProperty("recoveryKey").GetString() ?? "";
-        var destinationDir = ResolveDestinationDirFromRequest(request);
+        var destinationDir = VaultProtocolHandlers.ResolveDestinationDirFromRequest(request);
 
-        var result = await _lockService.DecryptByRecoveryKeyAsync(uuid, recoveryKeyInput, destinationDir);
+        var result = await _protocolHandlers.DecryptByRecoveryKeyAsync(uuid, recoveryKeyInput, destinationDir);
 
         SendToFrontend(new
         {
             type = "decryptByRecoveryKeyResult",
             uuid,
-            success = result.Success,
-            restoredPath = result.RestoredPath,
-            errorMessage = result.ErrorMessage,
-            errorCode = result.ErrorCode,
-            errorDetail = result.ErrorDetail
+            result.Success,
+            result.RestoredPath,
+            result.ErrorMessage,
+            result.ErrorCode,
+            result.ErrorDetail
         });
     }
 
@@ -623,10 +619,9 @@ public partial class MainWindow : Window
 
         var successCount = 0;
 
-        foreach (var uuid in uuids)
+        await foreach (var item in _protocolHandlers.DecryptBatchAsync(uuids, password))
         {
-            var result = await _lockService.DecryptByUuidAsync(uuid, password);
-            if (result.Success)
+            if (item.Success)
             {
                 successCount++;
             }
@@ -634,40 +629,16 @@ public partial class MainWindow : Window
             SendToFrontend(new
             {
                 type = "decryptBatchItemResult",
-                uuid,
-                success = result.Success,
-                restoredPath = result.RestoredPath,
-                errorMessage = result.ErrorMessage,
-            errorCode = result.ErrorCode,
-            errorDetail = result.ErrorDetail
+                item.Uuid,
+                item.Success,
+                item.RestoredPath,
+                item.ErrorMessage,
+                item.ErrorCode,
+                item.ErrorDetail
             });
         }
 
         SendToFrontend(new { type = "decryptBatchDone", totalCount = uuids.Count, successCount });
-    }
-
-    /// <summary>
-    /// decryptByPasskey／decryptByRecoveryKey 共用：優先用前端明確指定的 destinationDir；
-    /// 沒有的話，若前端傳了 markerPath（例如「解密」頁籤選了 .locked 檔案的情境），
-    /// 用該檔案目前所在的資料夾當還原位置，維持跟密碼路徑一致的行為。
-    /// </summary>
-    private static string? ResolveDestinationDirFromRequest(JsonElement request)
-    {
-        if (request.TryGetProperty("destinationDir", out var destProp) && destProp.ValueKind == JsonValueKind.String)
-        {
-            return destProp.GetString();
-        }
-
-        if (request.TryGetProperty("markerPath", out var markerProp) && markerProp.ValueKind == JsonValueKind.String)
-        {
-            var markerPath = markerProp.GetString();
-            if (!string.IsNullOrEmpty(markerPath))
-            {
-                return Path.GetDirectoryName(Path.GetFullPath(markerPath));
-            }
-        }
-
-        return null;
     }
 
     /// <summary>
@@ -748,25 +719,17 @@ public partial class MainWindow : Window
     private void HandleInspectLockedFileRequest(JsonElement request)
     {
         var path = request.GetProperty("path").GetString() ?? "";
-        var marker = LockedMarkerFile.ReadFrom(path);
-
-        if (marker is null)
-        {
-            SendToFrontend(new { type = "inspectLockedFileResult", success = false });
-            return;
-        }
-
-        var metadata = _vaultManager.LoadMetadata(marker.Uuid);
+        var result = _protocolHandlers.InspectLockedFile(path);
 
         SendToFrontend(new
         {
             type = "inspectLockedFileResult",
-            success = metadata is not null,
-            uuid = marker.Uuid,
-            originalName = metadata?.OriginalName,
-            hint = metadata?.Hint,
-            passkeyEnabled = metadata?.PasskeyEnabled ?? false,
-            recoveryKeyEnabled = metadata?.RecoveryKeyEnabled ?? false
+            result.Success,
+            result.Uuid,
+            result.OriginalName,
+            result.Hint,
+            result.PasskeyEnabled,
+            result.RecoveryKeyEnabled
         });
     }
 
@@ -783,45 +746,15 @@ public partial class MainWindow : Window
             .Select(p => p.GetString() ?? "")
             .ToList();
 
-        var items = await Task.Run(() => paths.Select(GetPathSizeInfoSafe).ToList());
+        var items = await _protocolHandlers.GetPathSizesAsync(paths);
 
         SendToFrontend(new { type = "pathSizesResult", items });
     }
 
-    private static object GetPathSizeInfoSafe(string path)
-    {
-        try
-        {
-            if (File.Exists(path))
-            {
-                return new { bytes = new FileInfo(path).Length, isFolder = false };
-            }
-
-            if (Directory.Exists(path))
-            {
-                var totalBytes = new DirectoryInfo(path)
-                    .EnumerateFiles("*", SearchOption.AllDirectories)
-                    .Sum(f => f.Length);
-                return new { bytes = totalBytes, isFolder = true };
-            }
-        }
-        catch (Exception)
-        {
-            // 存取不到（權限、路徑被移走之類）就當作 0，這是估算用的輔助功能，不值得為此中斷。
-        }
-
-        return new { bytes = 0L, isFolder = false };
-    }
-
     private void HandleGetSettingsRequest()
     {
-        SendToFrontend(new
-        {
-            type = "settingsResult",
-            vaultPath = _settings.VaultPath,
-            language = _settings.Language,
-            theme = _settings.Theme
-        });
+        var settings = _protocolHandlers.GetSettings();
+        SendToFrontend(new { type = "settingsResult", settings.VaultPath, settings.Language, settings.Theme });
     }
 
     private void HandlePickVaultFolder()
@@ -849,60 +782,17 @@ public partial class MainWindow : Window
     private async Task HandleChangeVaultPathRequestAsync(JsonElement request)
     {
         var newPath = request.GetProperty("newPath").GetString() ?? "";
-        var currentPath = _settings.VaultPath!;
 
-        if (string.Equals(Path.GetFullPath(newPath), Path.GetFullPath(currentPath), StringComparison.OrdinalIgnoreCase))
-        {
-            SendToFrontend(new { type = "changeVaultPathResult", success = false, errorMessage = "新位置跟目前位置相同，不需要搬移。" });
-            return;
-        }
+        var result = await _protocolHandlers.ChangeVaultPathAsync(newPath);
 
-        if (Directory.Exists(newPath) && Directory.EnumerateFileSystemEntries(newPath).Any())
+        SendToFrontend(new
         {
-            SendToFrontend(new { type = "changeVaultPathResult", success = false, errorMessage = "新位置的資料夾不是空的，請選一個空資料夾，避免跟裡面既有的檔案混在一起。" });
-            return;
-        }
-
-        try
-        {
-            await Task.Run(() => MoveVaultContents(currentPath, newPath));
-
-            _settings.VaultPath = newPath;
-            _settingsManager.Save(_settings);
-
-            SendToFrontend(new { type = "changeVaultPathResult", success = true, newPath, requiresRestart = true });
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            SendToFrontend(new { type = "changeVaultPathResult", success = false, errorMessage = $"搬移失敗：{ex.Message}" });
-        }
-    }
-
-    /// <summary>優先用 Directory.Move（同一個磁碟區內幾乎瞬間完成）；跨磁碟區的話 Directory.Move 會失敗，退而求其次逐一複製再刪除來源。</summary>
-    private static void MoveVaultContents(string sourcePath, string destinationPath)
-    {
-        if (Directory.Exists(destinationPath) && !Directory.EnumerateFileSystemEntries(destinationPath).Any())
-        {
-            Directory.Delete(destinationPath);
-        }
-
-        try
-        {
-            Directory.Move(sourcePath, destinationPath);
-            return;
-        }
-        catch (IOException)
-        {
-            // 通常是跨磁碟區導致 Directory.Move 不支援，改用複製再刪除。
-        }
-
-        Directory.CreateDirectory(destinationPath);
-        foreach (var filePath in Directory.EnumerateFiles(sourcePath))
-        {
-            var targetPath = Path.Combine(destinationPath, Path.GetFileName(filePath));
-            File.Copy(filePath, targetPath, overwrite: false);
-        }
-        Directory.Delete(sourcePath, recursive: true);
+            type = "changeVaultPathResult",
+            result.Success,
+            newPath = result.NewPath,
+            result.ErrorMessage,
+            result.RequiresRestart
+        });
     }
 
     private void HandleUpdateSettingRequest(JsonElement request)
@@ -910,102 +800,50 @@ public partial class MainWindow : Window
         var key = request.GetProperty("key").GetString() ?? "";
         var value = request.GetProperty("value").GetString() ?? "";
 
-        switch (key)
+        var result = _protocolHandlers.UpdateSetting(key, value);
+        if (!result.Success)
         {
-            case "language":
-                _settings.Language = value;
-                break;
-            case "theme":
-                _settings.Theme = value;
-                ApplyWindowBackgroundForTheme(value);
-                break;
-            default:
-                return;
+            return;
         }
 
-        _settingsManager.Save(_settings);
-        SendToFrontend(new { type = "updateSettingResult", success = true, key, value });
+        // 套用到這個視窗本身的背景色是 WPF 平台細節，設定值有沒有存成功是業務邏輯——
+        // 兩件事分開做，UpdateSetting 只管持久化，視覺副作用留在這裡。
+        if (key == "theme")
+        {
+            ApplyWindowBackgroundForTheme(value);
+        }
+
+        SendToFrontend(new { type = "updateSettingResult", result.Success, result.Key, result.Value });
     }
 
     private async Task HandleListVaultRequestAsync()
     {
-        var items = await Task.Run(() =>
-        {
-            // 清單「有哪些項目」改讀 VaultIndexCache（本機 SQLite 快取，不用每次都全量重掃
-            // Vault 資料夾）；但每一筆的 CheckMarkerStatus 仍然是即時查詢——那是原始位置的
-            // .locked 指標檔還在不在，跟 Vault 資料夾內容無關，本來就該每次刷新都重新問一次
-            // 磁碟，不應該被快取。用 AsParallel 讓多筆的檔案 I/O 可以同時進行，而不是一筆一筆
-            // 排隊等——項目數量少的時候感覺不出差異，項目一多（幾百筆）刷新清單會明顯變快。
-            var entries = _vaultIndexCache.GetItems();
-
-            return entries
-                .AsParallel()
-                .Select(entry =>
-                {
-                    var markerStatus = _lockService.CheckMarkerStatus(entry.Uuid, entry.OriginalPath, entry.Type);
-                    return new
-                    {
-                        uuid = entry.Uuid,
-                        originalName = entry.OriginalName,
-                        originalPath = entry.OriginalPath,
-                        type = entry.Type.ToString(),
-                        passkeyEnabled = entry.PasskeyEnabled,
-                        recoveryKeyEnabled = entry.RecoveryKeyEnabled,
-                        batchId = entry.BatchId,
-                        originalSizeBytes = entry.OriginalSizeBytes,
-                        hint = entry.Hint,
-                        createdAtUtc = entry.CreatedAtUtc,
-                        hasNestedLocks = entry.NestedLockCount > 0,
-                        nestedLockCount = entry.NestedLockCount,
-                        markerFound = markerStatus.Found,
-                        markerStatusMessage = markerStatus.Message
-                    };
-                })
-                .ToList()
-                .OrderByDescending(m => m.createdAtUtc)
-                .ToList();
-        });
-
+        var items = await _protocolHandlers.ListVaultAsync();
         SendToFrontend(new { type = "vaultList", items });
     }
 
     /// <summary>對應「使用紀錄」子頁籤：跟 Vault 目前狀態無關，單純把本機累積的操作日誌全部讀出來。</summary>
     private void HandleListHistoryRequest()
     {
-        var entries = _historyLogger.ReadAll()
-            .OrderByDescending(entry => entry.TimestampUtc)
-            .Select(entry => new
-            {
-                uuid = entry.Uuid,
-                originalName = entry.OriginalName,
-                action = entry.Action.ToString(),
-                timestampUtc = entry.TimestampUtc,
-                detail = entry.Detail,
-                sourcePath = entry.SourcePath,
-                passkeyEnabled = entry.PasskeyEnabled,
-                recoveryKeyEnabled = entry.RecoveryKeyEnabled,
-                unlockMethod = entry.UnlockMethod,
-                restoredPath = entry.RestoredPath
-            });
-
-        SendToFrontend(new { type = "historyList", items = entries });
+        var items = _protocolHandlers.ListHistory();
+        SendToFrontend(new { type = "historyList", items });
     }
 
     private async Task HandleDeleteRecordRequestAsync(JsonElement request)
     {
         var uuid = request.GetProperty("uuid").GetString() ?? "";
 
-        var result = await _lockService.TryDeleteRecordAsync(uuid);
+        var result = await _protocolHandlers.DeleteRecordAsync(uuid);
 
         SendToFrontend(new
         {
             type = "deleteRecordResult",
             uuid,
-            success = result.Success,
-            blockedByNestedLocks = result.BlockedByNestedLocks,
-            nestedUuids = result.NestedUuids,
-            errorMessage = result.ErrorMessage,
-            errorCode = result.ErrorCode
+            result.Success,
+            result.BlockedByNestedLocks,
+            result.NestedUuids,
+            result.ErrorMessage,
+            result.ErrorCode
         });
     }
 
@@ -1060,8 +898,17 @@ public partial class MainWindow : Window
         }
     }
 
+    // 既有的匿名型別訊息（type = "..." 這種寫法）本來就直接把 C# 屬性名稱寫成 camelCase，
+    // 這個命名策略對它們是不動作（"type" 已經是小寫開頭）；VaultProtocolHandlers 回傳的
+    // response record 用慣例的 PascalCase 屬性名稱，靠這個策略轉成前端預期的 camelCase JSON，
+    // 兩種寫法可以在同一個 SendToFrontend 底下並存，不用回頭把舊的匿名型別全部改名。
+    private static readonly JsonSerializerOptions SendToFrontendJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+
     private void SendToFrontend(object message)
     {
-        MainWebView.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(message));
+        MainWebView.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(message, SendToFrontendJsonOptions));
     }
 }

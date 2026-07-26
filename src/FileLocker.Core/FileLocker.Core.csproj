@@ -8,7 +8,11 @@
 
   <ItemGroup>
     <PackageReference Include="Konscious.Security.Cryptography.Argon2" Version="1.3.1" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
+    <!-- Microsoft.Data.Sqlite 10.0.10 間接帶進的 SQLitePCLRaw 2.1.11 有 CVE-2025-6965（SQLite < 3.50.2
+         的記憶體損毀漏洞，GHSA-2m69-gcr7-jv3q）。上游還沒更新這條相依鏈的版本上限，這裡直接把
+         transitive 相依覆寫到已修補的版本，強制解析用較新版本。 -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
   </ItemGroup>
 
 </Project>

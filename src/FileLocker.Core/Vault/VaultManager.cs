@@ -23,6 +23,14 @@ public class VaultManager
 
     private string ConfigPath => Path.Combine(VaultPath, "vault.config.json");
     private string EncPath(string uuid) => Path.Combine(VaultPath, $"{uuid}.enc");
+
+    /// <summary>
+    /// 對應架構審查（2026-07-26）：曝露成 interface 的一部分，讓 VaultIndexCache 之類的呼叫端
+    /// 需要知道某個 UUID 對應的 .meta.json 實際路徑時（例如查詢檔案的最後寫入時間）可以直接問
+    /// 這裡，不用自己重算一次同樣的檔名規則——正規檔名只在這裡定義一次。
+    /// </summary>
+    public string GetMetaFilePath(string uuid) => MetaPath(uuid);
+
     private string MetaPath(string uuid) => Path.Combine(VaultPath, $"{uuid}.meta.json");
 
     /// <summary>
