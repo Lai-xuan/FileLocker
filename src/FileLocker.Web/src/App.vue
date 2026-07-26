@@ -204,10 +204,17 @@ const recoveryKeyIconUrl = computed(() => settingsTheme.value === 'dark' ? recov
 const settingsSaveMessage = ref('')
 const isChangingVaultPath = ref(false)
 
-// ---- 加密頁籤 ----
+// ---- 加密頁籤：分兩步驟，第一步只選檔案/資料夾，第二步才是密碼跟進階選項——
+// 兩者視覺權重差很多（一個是必經流程，一個是偶爾用得到的進階功能），分開後主線操作
+// 不會被一長串表單稀釋掉。 ----
+const encryptStep = ref(1) // 1 | 2
 const encryptPaths = ref([])
 const isDraggingFile = ref(false) // 拖著檔案進入視窗範圍時為 true，見 MainWindow.xaml.cs 的拖放事件說明
 const encryptPassword = ref('')
+const encryptPasswordConfirm = ref('')
+// 密碼跟確認密碼共用同一個顯示/隱藏狀態——兩個欄位本來就是要互相核對，同時顯示比較好核對，
+// 沒必要分開切換。
+const showEncryptPassword = ref(false)
 const hint = ref('')
 const enablePasskey = ref(false)
 const enableRecoveryKey = ref(false)
@@ -435,7 +442,10 @@ const messageHandlers = {
     // 一次不是很大的負擔，但讓密碼長時間留在畫面上是不必要的風險。提示文字不算敏感資料，
     // 但同一批既然結束了，一起清掉、準備接下一批比較乾淨。
     encryptPassword.value = ''
+    encryptPasswordConfirm.value = ''
     hint.value = ''
+    // 回到第一步，下次進來重新從選檔案開始，不會卡在已經送出過的密碼頁。
+    encryptStep.value = 1
   },
 
   decryptResult(data) {
@@ -857,8 +867,17 @@ function decryptTabViaRecoveryKey() {
 }
 
 async function submitEncrypt() {
-  if (encryptPaths.value.length === 0 || !encryptPassword.value) {
-    encryptItemResults.value = [{ path: '', success: false, errorMessage: t('encrypt.needAtLeastOne'), note: '' }]
+  // 理論上按不到第二步（第一步的「下一步」按鈕沒選項目就不能按），這裡保留防禦性檢查。
+  if (encryptPaths.value.length === 0) {
+    encryptItemResults.value = [{ path: '', success: false, errorMessage: t('encrypt.passwordRequired'), note: '' }]
+    return
+  }
+  if (!encryptPassword.value) {
+    encryptItemResults.value = [{ path: '', success: false, errorMessage: t('encrypt.passwordRequired'), note: '' }]
+    return
+  }
+  if (encryptPassword.value !== encryptPasswordConfirm.value) {
+    encryptItemResults.value = [{ path: '', success: false, errorMessage: t('encrypt.passwordMismatch'), note: '' }]
     return
   }
   isEncrypting.value = true
@@ -1177,92 +1196,127 @@ function historyDetailText(entry) {
             <svg class="page-title__icon" viewBox="0 0 24 24" fill="none"><path d="M6 10V8a6 6 0 1 1 12 0v2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="4" y="10" width="16" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="15" r="1.6" fill="currentColor"/></svg>
             {{ t('encrypt.title') }}
           </h1>
+          <p class="step-indicator">{{ t('encrypt.stepIndicator', { step: encryptStep, total: 2 }) }}</p>
 
-          <div class="field">
-            <label class="field__label">{{ t('encrypt.itemsLabel') }}</label>
+          <div v-if="encryptStep === 1">
+            <div class="field">
+              <label class="field__label">{{ t('encrypt.itemsLabel') }}</label>
+              <div class="button-row">
+                <button class="button button--secondary" @click="pickFile" type="button">{{ t('encrypt.pickFiles') }}</button>
+                <button class="button button--secondary" @click="pickFolder" type="button">{{ t('encrypt.pickFolder') }}</button>
+              </div>
+              <div
+                v-if="encryptPaths.length === 0"
+                class="dropzone"
+                :class="{ 'is-dragging': isDraggingFile }"
+                @dragover.prevent="isDraggingFile = true"
+                @dragleave.prevent="isDraggingFile = false"
+                @drop.prevent="handleFileDrop"
+              >
+                <svg class="dropzone__icon" viewBox="0 0 24 24" fill="none"><path d="M12 4v11m0-11 4 4m-4-4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 16v2.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+                <p class="dropzone__text">{{ t('encrypt.dropHint') }}</p>
+              </div>
+              <ul v-else class="item-list">
+                <li v-for="(path, index) in encryptPaths" :key="path" class="item-list__row">
+                  <span class="item-list__path" :title="path">{{ path }}</span>
+                  <button class="link-button" @click="removeEncryptPath(index)" type="button">{{ t('encrypt.remove') }}</button>
+                </li>
+              </ul>
+            </div>
+
+            <button class="button button--primary" @click="encryptStep = 2" :disabled="encryptPaths.length === 0">
+              {{ t('encrypt.next') }}
+            </button>
+          </div>
+
+          <div v-else>
+            <div class="field">
+              <label class="field__label">{{ t('encrypt.passwordLabel') }}</label>
+              <div class="password-field">
+                <input v-model="encryptPassword" :type="showEncryptPassword ? 'text' : 'password'" class="text-input" />
+                <button
+                  type="button"
+                  class="password-field__toggle"
+                  :aria-label="t(showEncryptPassword ? 'encrypt.hidePassword' : 'encrypt.showPassword')"
+                  @click="showEncryptPassword = !showEncryptPassword"
+                >
+                  <svg v-if="showEncryptPassword" viewBox="0 0 24 24" fill="none"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="2.75" stroke="currentColor" stroke-width="1.6"/></svg>
+                  <svg v-else viewBox="0 0 24 24" fill="none"><path d="M3 3l18 18M9.9 5.1A10.7 10.7 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17.1 17.1 0 0 1-3.15 4.05M6.5 6.9C4.1 8.6 2.5 12 2.5 12s3.5 6.5 9.5 6.5c1.1 0 2.1-.2 3-.55M14.1 14.1a2.75 2.75 0 0 1-3.9-3.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+              </div>
+            </div>
+
+            <div class="field">
+              <label class="field__label">{{ t('encrypt.passwordConfirmLabel') }}</label>
+              <div class="password-field">
+                <input v-model="encryptPasswordConfirm" :type="showEncryptPassword ? 'text' : 'password'" class="text-input" />
+              </div>
+              <!-- 不做強度判斷（強度高低跟好不好記是兩件事，沒辦法從字串本身判斷使用者記不記得住）；
+                   只要恢復金鑰沒開，就用位置接近性提醒兩者的關聯，不對密碼本身評價。 -->
+              <p v-if="!enableRecoveryKey" class="hint-text">{{ t('encrypt.recoveryKeyReminder') }}</p>
+            </div>
+
+            <div class="field">
+              <label class="field__label">{{ t('encrypt.hintLabel') }}</label>
+              <input v-model="hint" class="text-input" />
+            </div>
+
+            <div class="field">
+              <label class="checkbox-field" :class="{ 'is-disabled': encryptPaths.length > 1 }">
+                <input type="checkbox" v-model="enablePasskey" :disabled="encryptPaths.length > 1" />
+                <img :src="passkeyIconUrl" alt="" class="checkbox-field__icon" />
+                <span>{{ t('encrypt.passkeyLabel') }}</span>
+                <span class="info-tooltip" tabindex="0">
+                  <span class="info-tooltip__icon">i</span>
+                  <span class="info-tooltip__bubble">{{ t('encrypt.passkeyLabelDetail') }}</span>
+                </span>
+              </label>
+              <p v-if="encryptPaths.length > 1" class="hint-text hint-text--indented">
+                {{ t('encrypt.passkeyBatchDisabled') }}
+              </p>
+            </div>
+
+            <div class="field">
+              <label class="checkbox-field" :class="{ 'is-disabled': encryptPaths.length > 1 }">
+                <input type="checkbox" v-model="enableRecoveryKey" :disabled="encryptPaths.length > 1" />
+                <img :src="recoveryKeyIconUrl" alt="" class="checkbox-field__icon" />
+                <span>{{ t('encrypt.recoveryKeyLabel') }}</span>
+                <span class="info-tooltip" tabindex="0">
+                  <span class="info-tooltip__icon">i</span>
+                  <span class="info-tooltip__bubble">{{ t('encrypt.recoveryKeyLabelDetail') }}</span>
+                </span>
+              </label>
+              <p v-if="encryptPaths.length > 1" class="hint-text hint-text--indented">
+                {{ t('encrypt.recoveryKeyBatchDisabled') }}
+              </p>
+            </div>
+
             <div class="button-row">
-              <button class="button button--secondary" @click="pickFile" type="button">{{ t('encrypt.pickFiles') }}</button>
-              <button class="button button--secondary" @click="pickFolder" type="button">{{ t('encrypt.pickFolder') }}</button>
+              <button class="button button--secondary" @click="encryptStep = 1" :disabled="isEncrypting" type="button">
+                {{ t('encrypt.back') }}
+              </button>
+              <button class="button button--primary" @click="submitEncrypt" :disabled="isEncrypting">
+                {{ isEncrypting
+                  ? t(encryptPhaseLabel === 'compressing' ? 'encrypt.compressing' : 'encrypt.encrypting', { current: encryptItemResults.length, total: encryptBatchTotal })
+                  : t('encrypt.submit') }}
+              </button>
             </div>
-            <div
-              v-if="encryptPaths.length === 0"
-              class="dropzone"
-              :class="{ 'is-dragging': isDraggingFile }"
-              @dragover.prevent="isDraggingFile = true"
-              @dragleave.prevent="isDraggingFile = false"
-              @drop.prevent="handleFileDrop"
-            >
-              <svg class="dropzone__icon" viewBox="0 0 24 24" fill="none"><path d="M12 4v11m0-11 4 4m-4-4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 16v2.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-              <p class="dropzone__text">{{ t('encrypt.dropHint') }}</p>
+
+            <div v-if="isEncrypting" class="progress-bar" role="progressbar" :aria-valuenow="Math.round(encryptProgressPercent)" aria-valuemin="0" aria-valuemax="100">
+              <div class="progress-bar__fill" :style="{ transform: `scaleX(${encryptProgressPercent / 100})` }"></div>
             </div>
-            <ul v-else class="item-list">
-              <li v-for="(path, index) in encryptPaths" :key="path" class="item-list__row">
-                <span class="item-list__path" :title="path">{{ path }}</span>
-                <button class="link-button" @click="removeEncryptPath(index)" type="button">{{ t('encrypt.remove') }}</button>
-              </li>
-            </ul>
+
+            <TransitionGroup name="result-row" tag="div" class="result-list">
+              <div v-for="(item, index) in encryptItemResults" :key="index" class="result-row" :class="item.success ? 'result-row--success' : 'result-row--error'">
+                <span class="result-row__icon">{{ item.success ? '✓' : '✕' }}</span>
+                <span>
+                  <template v-if="item.path">{{ item.path }}</template>
+                  <span v-if="item.errorMessage"> — {{ item.errorMessage }}</span>
+                  <span v-if="item.note"> — {{ item.note }}</span>
+                </span>
+              </div>
+            </TransitionGroup>
           </div>
-
-          <div class="field">
-            <label class="field__label">{{ t('encrypt.passwordLabel') }}</label>
-            <input v-model="encryptPassword" type="password" class="text-input" />
-          </div>
-
-          <div class="field">
-            <label class="field__label">{{ t('encrypt.hintLabel') }}</label>
-            <input v-model="hint" class="text-input" />
-          </div>
-
-          <div class="field">
-            <label class="checkbox-field" :class="{ 'is-disabled': encryptPaths.length > 1 }">
-              <input type="checkbox" v-model="enablePasskey" :disabled="encryptPaths.length > 1" />
-              <img :src="passkeyIconUrl" alt="" class="checkbox-field__icon" />
-              <span>{{ t('encrypt.passkeyLabel') }}</span>
-              <span class="info-tooltip" tabindex="0">
-                <span class="info-tooltip__icon">i</span>
-                <span class="info-tooltip__bubble">{{ t('encrypt.passkeyLabelDetail') }}</span>
-              </span>
-            </label>
-            <p v-if="encryptPaths.length > 1" class="hint-text hint-text--indented">
-              {{ t('encrypt.passkeyBatchDisabled') }}
-            </p>
-          </div>
-
-          <div class="field">
-            <label class="checkbox-field" :class="{ 'is-disabled': encryptPaths.length > 1 }">
-              <input type="checkbox" v-model="enableRecoveryKey" :disabled="encryptPaths.length > 1" />
-              <img :src="recoveryKeyIconUrl" alt="" class="checkbox-field__icon" />
-              <span>{{ t('encrypt.recoveryKeyLabel') }}</span>
-              <span class="info-tooltip" tabindex="0">
-                <span class="info-tooltip__icon">i</span>
-                <span class="info-tooltip__bubble">{{ t('encrypt.recoveryKeyLabelDetail') }}</span>
-              </span>
-            </label>
-            <p v-if="encryptPaths.length > 1" class="hint-text hint-text--indented">
-              {{ t('encrypt.recoveryKeyBatchDisabled') }}
-            </p>
-          </div>
-
-          <button class="button button--primary" @click="submitEncrypt" :disabled="isEncrypting">
-            {{ isEncrypting
-              ? t(encryptPhaseLabel === 'compressing' ? 'encrypt.compressing' : 'encrypt.encrypting', { current: encryptItemResults.length, total: encryptBatchTotal })
-              : t('encrypt.submit') }}
-          </button>
-
-          <div v-if="isEncrypting" class="progress-bar" role="progressbar" :aria-valuenow="Math.round(encryptProgressPercent)" aria-valuemin="0" aria-valuemax="100">
-            <div class="progress-bar__fill" :style="{ transform: `scaleX(${encryptProgressPercent / 100})` }"></div>
-          </div>
-
-          <TransitionGroup name="result-row" tag="div" class="result-list">
-            <div v-for="(item, index) in encryptItemResults" :key="index" class="result-row" :class="item.success ? 'result-row--success' : 'result-row--error'">
-              <span class="result-row__icon">{{ item.success ? '✓' : '✕' }}</span>
-              <span>
-                <template v-if="item.path">{{ item.path }}</template>
-                <span v-if="item.errorMessage"> — {{ item.errorMessage }}</span>
-                <span v-if="item.note"> — {{ item.note }}</span>
-              </span>
-            </div>
-          </TransitionGroup>
         </div>
 
         <div v-else-if="activeTab === 'decrypt'">
@@ -2027,6 +2081,14 @@ body {
   flex-shrink: 0;
 }
 
+.step-indicator {
+  margin: -1.2rem 0 1.25rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+  text-align: left;
+}
+
 /* ---- 表單欄位 ---- */
 .field {
   margin-bottom: 1.375rem;
@@ -2064,6 +2126,42 @@ body {
   outline: none;
   border-color: var(--color-accent);
   box-shadow: 0 0 0 3px var(--color-accent-soft);
+}
+
+.password-field {
+  position: relative;
+}
+
+.password-field .text-input {
+  padding-right: 2.4rem;
+}
+
+.password-field__toggle {
+  position: absolute;
+  top: 50%;
+  right: 0.5rem;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: color var(--duration-fast) ease;
+}
+
+.password-field__toggle:hover {
+  color: var(--color-text);
+}
+
+.password-field__toggle svg {
+  width: 18px;
+  height: 18px;
 }
 
 textarea.text-input {
