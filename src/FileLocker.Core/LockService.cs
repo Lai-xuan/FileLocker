@@ -625,6 +625,53 @@ public class LockService
         return RestoreFromKey(metadata, encryptionKey, destinationParentDir, "password");
     }
 
+    /// <summary>
+    /// 對應「已加密清單」頁永久刪除前的密碼再驗證：跟 DecryptAndRestore 共用同一套密碼驗證＋
+    /// 鎖定機制，但驗證通過後不呼叫 RestoreFromKey——永久刪除不需要、也不該碰觸加密內容本身，
+    /// 只是要證明「按下永久刪除的人真的知道密碼」。
+    /// </summary>
+    public Task<VerifyPasswordResult> VerifyPasswordAsync(string uuid, string password)
+        => Task.Run(() => VerifyPasswordCore(uuid, password));
+
+    private VerifyPasswordResult VerifyPasswordCore(string uuid, string password)
+    {
+        var metadata = _vault.LoadMetadata(uuid);
+        if (metadata is null)
+        {
+            return new VerifyPasswordResult(false, "找不到對應的加密紀錄", ErrorCode: ErrorCodes.RecordNotFound);
+        }
+
+        if (_lockout is not null)
+        {
+            var lockoutStatus = _lockout.CheckStatus(metadata.Uuid);
+            if (lockoutStatus.IsLockedOut)
+            {
+                return new VerifyPasswordResult(false, $"密碼錯誤次數過多，請在 {FormatRemaining(lockoutStatus.RemainingLockout!.Value)}後再試", ErrorCode: ErrorCodes.LockedOut, ErrorDetail: ((int)lockoutStatus.RemainingLockout!.Value.TotalSeconds).ToString());
+            }
+        }
+
+        var salt = Convert.FromBase64String(metadata.Salt);
+        var storedHash = Convert.FromBase64String(metadata.PasswordVerificationHash);
+
+        var (isValid, encryptionKey) = Argon2KeyDerivation.VerifyPassword(
+            password, salt, storedHash,
+            metadata.Argon2TimeCost, metadata.Argon2MemoryCostKb, metadata.Argon2Parallelism);
+
+        if (encryptionKey is not null)
+        {
+            CryptographicOperations.ZeroMemory(encryptionKey);
+        }
+
+        if (!isValid)
+        {
+            _lockout?.RecordFailedAttempt(metadata.Uuid);
+            return new VerifyPasswordResult(false, "密碼錯誤", ErrorCode: ErrorCodes.PasswordIncorrect);
+        }
+
+        _lockout?.RecordSuccess(metadata.Uuid);
+        return new VerifyPasswordResult(true);
+    }
+
     private static string FormatRemaining(TimeSpan remaining)
     {
         return remaining.TotalMinutes >= 1

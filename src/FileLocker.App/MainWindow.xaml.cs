@@ -19,18 +19,25 @@ public partial class MainWindow : Window
     // 不是真的網域，不需要真的擁有或註冊這個名稱。
     private const string AppOrigin = "filelocker.local";
 
-    // ---- 無邊框視窗的兩個已知陷阱修正 ----
+    // ---- 無邊框視窗的已知陷阱修正 ----
     //
-    // 1. 圓角／陰影：WindowStyle="None" 拿掉原生標題列的同時，也會把 Windows 11 預設的
-    //    視窗圓角跟投影一起拿掉，變成一個直角的方框。用 DwmSetWindowAttribute 手動要回來。
-    //    Windows 10 沒有這個 DWM 屬性，呼叫會失敗，安靜略過即可，不影響其他功能。
+    // 1. 圓角／陰影：Windows 11 的原生視窗圓角跟投影理論上會因為保留 WS_CAPTION（見下方第 3 點、
+    //    MainWindow.xaml 的說明）自動維持，這裡的 DwmSetWindowAttribute 手動要回來當保險，
+    //    即使非必要也不影響行為。Windows 10 沒有這個 DWM 屬性，呼叫會失敗，安靜略過即可。
     //
-    // 2. 最大化超出工作區：這是 WindowChrome 無邊框視窗的經典 bug——WPF 內建的最大化尺寸
-    //    計算沒有正確扣掉隱形的縮放邊框（ResizeBorderThickness），導致視窗最大化時會往外
-    //    超出工作區邊界幾個像素，剛好等於縮放邊框的寬度。使用者裝了會佔用螢幕空間的工具
+    // 2. 最大化超出工作區：WPF 內建的最大化尺寸計算沒有正確扣掉隱形的縮放邊框，導致視窗最大化時
+    //    會往外超出工作區邊界幾個像素，剛好等於縮放邊框的寬度。使用者裝了會佔用螢幕空間的工具
     //    （工作列本身、或這次遇到的 MyDockFinder 這類第三方 Dock 工具）時，超出的那部分就會
     //    直接被蓋住看不到。修法是攔截 WM_GETMINMAXINFO 這個訊息，自己用系統回報的「工作區」
     //    （會扣掉所有登記佔用空間的工具，不只是內建工作列）算出正確的最大化尺寸。
+    //
+    // 3. 隱藏原生標題列，但保留 DWM 動畫：WindowStyle="SingleBorderWindow"（見 MainWindow.xaml）
+    //    刻意保留 WS_CAPTION／WS_THICKFRAME，讓 DWM 把這個視窗當一般可動畫的視窗看待（最大化/
+    //    還原才會有原生的長大/縮小動畫，這是之前 WindowStyle="None" + WindowChrome 做不到的）。
+    //    代價是原生標題列會真的被畫出來，所以要自己攔截 WM_NCCALCSIZE，把非客戶區（標題列／
+    //    邊框）視覺上收縮到 0（有樣式、但畫面上完全看不到）；再攔截 WM_NCHITTEST 自己判斷滑鼠
+    //    落在哪個縮放邊界（標題列拖曳／雙擊最大化維持交給 WebView2 的 IsNonClientRegionSupportEnabled，
+    //    這裡不搶著回 HTCAPTION，避免跟它打架）。
     private const int DwmwaWindowCornerPreference = 33;
     private const int DwmwcpRound = 2;
 
@@ -43,8 +50,39 @@ public partial class MainWindow : Window
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MonitorInfo lpmi);
 
+    [DllImport("user32.dll")]
+    private static extern bool IsZoomed(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetricsForDpi(int index, uint dpi);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hwnd, out RectStruct rect);
+
     private const uint MonitorDefaultToNearest = 2;
     private const int WmGetMinMaxInfo = 0x0024;
+    private const int WmNcCalcSize = 0x0083;
+    private const int WmNcHitTest = 0x0084;
+
+    // 縮放邊界判斷用的門檻，DIP 單位——要跟 MainWindow.xaml 裡 WebView2 的 Margin 一致
+    // （那圈真正的 WPF 空間是給這裡判斷縮放邊界用的滑鼠事件用的，見該處說明）。
+    private const int ResizeBorderThicknessDip = 6;
+
+    private const int SmCxsizeframe = 32;
+    private const int SmCysizeframe = 33;
+    private const int SmCxpaddedborder = 92;
+
+    private const int HtLeft = 10;
+    private const int HtRight = 11;
+    private const int HtTop = 12;
+    private const int HtTopLeft = 13;
+    private const int HtTopRight = 14;
+    private const int HtBottom = 15;
+    private const int HtBottomLeft = 16;
+    private const int HtBottomRight = 17;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct PointStruct
@@ -279,8 +317,95 @@ public partial class MainWindow : Window
             ApplyCorrectMaximizedBounds(hwnd, lParam);
             handled = true;
         }
+        else if (msg == WmNcCalcSize && wParam != IntPtr.Zero)
+        {
+            handled = true;
+            return HandleNcCalcSize(hwnd, lParam);
+        }
+        else if (msg == WmNcHitTest)
+        {
+            var hit = HandleNcHitTest(hwnd, lParam);
+            if (hit.HasValue)
+            {
+                handled = true;
+                return new IntPtr(hit.Value);
+            }
+        }
 
         return IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// 把非客戶區（標題列／邊框）視覺上收縮到 0——不做任何事、讓傳進來的建議矩形（rgrc[0]，
+    /// 跟 RectStruct 版面配置相同，只需要動這一個欄位）原封不動當作客戶區，整個視窗都變成
+    /// 客戶區，畫面上看不到任何原生框線。
+    ///
+    /// 但視窗最大化時，Windows 對 WS_THICKFRAME 視窗會自動往外多墊一圈看不見的縮放邊框，
+    /// 不處理的話最大化時內容會被裁掉一小圈——這裡要把建議矩形往內縮回這圈邊框的寬度
+    /// （SM_CXSIZEFRAME/SM_CYSIZEFRAME 加上 SM_CXPADDEDBORDER，用 GetSystemMetricsForDpi
+    /// 依視窗目前所在螢幕的 DPI 換算，不能用固定像素值，否則高 DPI 螢幕會裁太多／太少）。
+    /// </summary>
+    private static IntPtr HandleNcCalcSize(IntPtr hwnd, IntPtr lParam)
+    {
+        if (IsZoomed(hwnd))
+        {
+            var rect = Marshal.PtrToStructure<RectStruct>(lParam);
+
+            var dpi = GetDpiForWindow(hwnd);
+            var frameX = GetSystemMetricsForDpi(SmCxsizeframe, dpi) + GetSystemMetricsForDpi(SmCxpaddedborder, dpi);
+            var frameY = GetSystemMetricsForDpi(SmCysizeframe, dpi) + GetSystemMetricsForDpi(SmCxpaddedborder, dpi);
+
+            rect.Left += frameX;
+            rect.Top += frameY;
+            rect.Right -= frameX;
+            rect.Bottom -= frameY;
+
+            Marshal.StructureToPtr(rect, lParam, true);
+        }
+
+        return IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// 只負責回報縮放邊界，範圍外一律回傳 null（交給預設處理、落到 HTCLIENT）——標題列拖曳／
+    /// 雙擊最大化不在這裡搶著回 HTCAPTION，維持交給 WebView2 的 IsNonClientRegionSupportEnabled
+    /// 處理（見 Loaded 事件處理常式裡設定這個屬性的說明），避免兩邊都想處理 HTCAPTION 打架。
+    /// 最大化時不需要（也不應該）判斷縮放邊界，直接交給預設處理。
+    /// </summary>
+    private static int? HandleNcHitTest(IntPtr hwnd, IntPtr lParam)
+    {
+        if (IsZoomed(hwnd))
+        {
+            return null;
+        }
+
+        var coords = lParam.ToInt64();
+        var x = unchecked((short)(coords & 0xFFFF));
+        var y = unchecked((short)((coords >> 16) & 0xFFFF));
+
+        if (!GetWindowRect(hwnd, out var windowRect))
+        {
+            return null;
+        }
+
+        var dpi = GetDpiForWindow(hwnd);
+        var border = (int)Math.Round(ResizeBorderThicknessDip * dpi / 96.0);
+
+        var onLeft = x < windowRect.Left + border;
+        var onRight = x >= windowRect.Right - border;
+        var onTop = y < windowRect.Top + border;
+        var onBottom = y >= windowRect.Bottom - border;
+
+        if (onTop && onLeft) return HtTopLeft;
+        if (onTop && onRight) return HtTopRight;
+        if (onBottom && onLeft) return HtBottomLeft;
+        if (onBottom && onRight) return HtBottomRight;
+        if (onLeft) return HtLeft;
+        if (onRight) return HtRight;
+        if (onTop) return HtTop;
+        if (onBottom) return HtBottom;
+
+        return null;
     }
 
     /// <summary>
@@ -453,6 +578,10 @@ public partial class MainWindow : Window
 
                 case "deleteRecord":
                     await HandleDeleteRecordRequestAsync(root);
+                    break;
+
+                case "verifyPasswordForDelete":
+                    await HandleVerifyPasswordForDeleteRequestAsync(root);
                     break;
 
                 default:
@@ -844,6 +973,25 @@ public partial class MainWindow : Window
             result.NestedUuids,
             result.ErrorMessage,
             result.ErrorCode
+        });
+    }
+
+    /// <summary>對應「已加密清單」頁永久刪除前的密碼再驗證，驗證通過前端才會真的送出 deleteRecord。</summary>
+    private async Task HandleVerifyPasswordForDeleteRequestAsync(JsonElement request)
+    {
+        var uuid = request.GetProperty("uuid").GetString() ?? "";
+        var password = request.GetProperty("password").GetString() ?? "";
+
+        var result = await _protocolHandlers.VerifyPasswordAsync(uuid, password);
+
+        SendToFrontend(new
+        {
+            type = "verifyPasswordForDeleteResult",
+            uuid,
+            result.Success,
+            result.ErrorMessage,
+            result.ErrorCode,
+            result.ErrorDetail
         });
     }
 

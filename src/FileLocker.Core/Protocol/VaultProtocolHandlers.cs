@@ -272,4 +272,6 @@ public sealed class VaultProtocolHandlers
             .ToList();
 
     public Task<DeleteRecordResult> DeleteRecordAsync(string uuid) => _lockService.TryDeleteRecordAsync(uuid);
+
+    public Task<VerifyPasswordResult> VerifyPasswordAsync(string uuid, string password) => _lockService.VerifyPasswordAsync(uuid, password);
 }

@@ -25,6 +25,15 @@ internal static class ShellExtensionRegistrar
     /// 回傳 true 代表這次真的執行了註冊動作（通常代表是全新安裝，或應用程式資料夾被搬移過），
     /// 呼叫端可以依此決定要不要提示使用者重啟 Explorer 讓右鍵選單生效。
     /// </summary>
+    // "*" 這個類別在 Windows Shell 登錄機制裡只涵蓋檔案，不包含資料夾——資料夾要另外登記在
+    // "Directory" 底下右鍵選單才會出現。之前只登記了 "*"，導致右鍵資料夾完全看不到加密選項，
+    // 這裡兩個都要登記。
+    private static readonly string[] ContextMenuHandlerKeyPaths =
+    [
+        @"Software\Classes\*\shellex\ContextMenuHandlers\FileLocker",
+        @"Software\Classes\Directory\shellex\ContextMenuHandlers\FileLocker"
+    ];
+
     public static bool EnsureRegistered()
     {
         var dllPath = Path.Combine(AppContext.BaseDirectory, DllFileName);
@@ -35,7 +44,10 @@ internal static class ShellExtensionRegistrar
             return false;
         }
 
-        if (string.Equals(ReadRegisteredDllPath(), dllPath, StringComparison.OrdinalIgnoreCase))
+        var alreadyRegistered = string.Equals(ReadRegisteredDllPath(), dllPath, StringComparison.OrdinalIgnoreCase)
+            && IsContextMenuHandlerFullyRegistered();
+
+        if (alreadyRegistered)
         {
             return false; // 已經註冊且指向正確路徑，不需要重做。
         }
@@ -58,9 +70,31 @@ internal static class ShellExtensionRegistrar
         key.SetValue("ThreadingModel", "Apartment");
     }
 
+    /// <summary>
+    /// 檔案（"*"）跟資料夾（"Directory"）都要登記同一個 CLSID，右鍵選單才會同時對兩種情況出現。
+    /// 已經裝過舊版（只登記了 "*"）的使用者，下次啟動時 IsContextMenuHandlerFullyRegistered
+    /// 會偵測到 "Directory" 那筆缺漏，觸發重新註冊補上，不需要使用者手動重裝。
+    /// </summary>
     private static void RegisterContextMenuHandler()
     {
-        using var key = Registry.CurrentUser.CreateSubKey(@"Software\Classes\*\shellex\ContextMenuHandlers\FileLocker");
-        key.SetValue(null, ClsidString);
+        foreach (var keyPath in ContextMenuHandlerKeyPaths)
+        {
+            using var key = Registry.CurrentUser.CreateSubKey(keyPath);
+            key.SetValue(null, ClsidString);
+        }
+    }
+
+    private static bool IsContextMenuHandlerFullyRegistered()
+    {
+        foreach (var keyPath in ContextMenuHandlerKeyPaths)
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(keyPath);
+            if (!string.Equals(key?.GetValue(null) as string, ClsidString, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

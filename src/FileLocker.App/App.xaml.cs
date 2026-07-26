@@ -128,7 +128,7 @@ public partial class App : Application
         // 好幾個不同的項目），每次都開一個新的，不嘗試去找「有沒有已經開著的」。
         if (args.Length == 1 && LooksLikeLockedFileArgument(args[0]))
         {
-            var promptWindow = new PasswordPromptWindow(args[0], _vaultManager!, _lockService!);
+            var promptWindow = new PasswordPromptWindow(args[0], _vaultManager!, _lockService!, _settings!.Theme);
             promptWindow.Closed += (_, _) => ShutdownIfNoWindowsRemain();
             promptWindow.Show();
             return;

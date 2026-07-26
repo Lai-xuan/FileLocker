@@ -64,8 +64,7 @@ cl /LD /EHsc /utf-8 dllmain.cpp /Fe:FileLockerShellExtension.dll /link /DEF:File
 
 ## 已知限制（不是要修的 bug，是刻意的取捨或技術限制）
 
-- 密碼小視窗（`PasswordPromptWindow`）還是原生 WPF 標題列，沒有跟主視窗一起改成無邊框
-- 主視窗拿掉原生框架後，沒有原生的最大化長大/縮小動畫（技術限制，真正解法需要換成 WebView2 的 Composition Controller 托管模式，是另一個量級的工程）
+- 密碼小視窗（`PasswordPromptWindow`）已改成無邊框並對齊主視窗色彩/深色模式，但字體是 Segoe UI 不是 IBM Plex Sans——後者目前只有 `@fontsource` 的 woff/woff2 檔，WPF 原生字型堆疊不支援 woff 容器格式，專案裡沒有可以直接嵌入的 ttf/otf，之後想要完全一致需要另外取得字型檔案
 - 拖放檔案已經能動（用 WebView2 的 `postMessageWithAdditionalObjects` + `CoreWebView2File.Path`），不是走原生 WPF 拖放（試過會被 WebView2 攔死）
 - 後端錯誤代碼系統涵蓋 `LockService` 的常見錯誤情境，但設定頁（搬移 Vault、存恢復金鑰檔案）的少數訊息還是固定繁體中文
 - App 圖示跟 `.locked` 副檔名圖示都已經設計定案（黃銅色系，鑰匙孔/蠟封造型），但還沒接進 `.csproj` 或安裝程式的檔案關聯設定，也還沒匯出成 Windows 需要的 `.ico` 多解析度格式

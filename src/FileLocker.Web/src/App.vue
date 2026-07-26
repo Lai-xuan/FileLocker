@@ -76,8 +76,9 @@ function dismissToast(id) {
 
 // ---- 自訂確認對話框（取代原生 confirm()）：同樣的理由，換成跟其他彈窗一致的樣式。
 // askConfirm 回傳一個 Promise，呼叫端用 await 取得使用者按了「確定」還是「取消」。
-// 只適合真正的二選一（做／不做同一件事），例如永久刪除——「取消」在這種情境下就是
-// 單純不做任何事，語意上站得住腳。
+// 只適合真正的二選一、而且「取消」單純代表不做任何事的情境。永久刪除用在密碼驗證
+// 通過之後（見 verifyPasswordForDeleteResult）：密碼驗證負責證明「這個人真的知道密碼」，
+// 這裡負責「使用者真的要做這個不可逆的動作」的最後一道確認，兩件事分開確認。
 const confirmDialogState = ref(null) // { message, confirmLabel, cancelLabel, variant, resolve }
 function askConfirm(message, options = {}) {
   return new Promise((resolve) => {
@@ -142,6 +143,10 @@ function updateTabIndicator() {
 }
 
 watch(activeTab, () => nextTick(updateTabIndicator))
+
+// 切換語言後頁籤文字長度會跟著變（例如中文兩個字 vs 英文一個單字），按鈕實際寬度也會變，
+// 指示條要重新量測，不然會維持舊語言文字的寬度，跟新文字對不上。
+watch(currentLocale, () => nextTick(updateTabIndicator))
 
 // 視窗縮放（尤其這個 App 可以自由調整大小）會改變按鈕實際寬度，指示條要跟著重新對齊，
 // 不然縮放後位置會跟按鈕對不上。
@@ -388,9 +393,14 @@ const isHelpOpen = ref(false)
 // 密碼輸入彈窗：取代原本用瀏覽器原生 prompt() 明碼輸入密碼的做法——prompt() 的輸入框不會把
 // 打字內容用點點遮起來，旁邊有人看、或畫面被錄影/遠端連線時會直接看到密碼，這裡改用跟
 // 其他表單一致的遮罩密碼欄位。
-const passwordPromptContext = ref(null) // { mode: 'single' | 'batch', item或group, destinationDir }
+const passwordPromptContext = ref(null) // { mode: 'single' | 'batch' | 'delete', item或group, destinationDir }
 const passwordPromptValue = ref('')
 const passwordPromptInputRef = ref(null)
+
+// 永久刪除送出密碼驗證的當下，passwordPromptContext 就已經被清空（跟其他模式共用同一段
+// 收尾邏輯），等驗證結果回來時記不得是哪個項目——這裡另外記一份，驗證通過後用來組出
+// 最終確認彈窗的訊息，最終確認完（不管確定或取消）就清掉。
+const pendingDeleteItem = ref(null)
 
 // 原生的 autofocus 屬性對 Vue 動態插入的元素不可靠——瀏覽器通常只在「這個元素是網頁一開始
 // 載入時就存在」的情況下才會處理 autofocus，像這種用 v-if 動態生成的彈窗，瀏覽器常常不會
@@ -448,12 +458,15 @@ const messageHandlers = {
     encryptPaths.value = []
     // 密碼是敏感資料，不管這次成功還是失敗，都不該一直留在欄位裡——失敗的話重新輸入
     // 一次不是很大的負擔，但讓密碼長時間留在畫面上是不必要的風險。提示文字不算敏感資料，
-    // 但同一批既然結束了，一起清掉、準備接下一批比較乾淨。
+    // 但同一批既然結束了，一起清掉、準備接下一批比較乾淨。這些欄位在完成頁用不到，
+    // 不用等使用者按「完成」才清。
     encryptPassword.value = ''
     encryptPasswordConfirm.value = ''
     hint.value = ''
-    // 回到第一步，下次進來重新從選檔案開始，不會卡在已經送出過的密碼頁。
-    encryptStep.value = 1
+    // 切到完成頁讓使用者自己確認結果、按下「完成」才回步驟一——如果這次有恢復金鑰，
+    // 彈窗會疊在完成頁上面，關掉彈窗後畫面還是完成頁，不會像以前一樣底下先跳回步驟一。
+    encryptStepDirection.value = 'forward'
+    encryptStep.value = 3
   },
 
   decryptResult(data) {
@@ -563,6 +576,7 @@ const messageHandlers = {
   },
 
   error(data) {
+    const wasEncrypting = isEncrypting.value
     isEncrypting.value = false
     cancelFakeProgress()
     encryptProgressPercent.value = 0
@@ -570,6 +584,12 @@ const messageHandlers = {
     isLoadingList.value = false
     isLoadingHistory.value = false
     encryptItemResults.value.push({ path: '', success: false, errorMessage: t('alert.genericError', { message: data.message }), note: '' })
+    // 加密進行中途發生嚴重錯誤也要能看到結果——完成頁是結果清單現在唯一會顯示的地方，
+    // 不切過去的話使用者會卡在步驟二，看不到任何錯誤訊息。
+    if (wasEncrypting) {
+      encryptStepDirection.value = 'forward'
+      encryptStep.value = 3
+    }
   },
 
   pathPicked(data) {
@@ -640,6 +660,25 @@ const messageHandlers = {
 
   deleteRecordResult(data) {
     handleDeleteRecordResult(data)
+  },
+
+  async verifyPasswordForDeleteResult(data) {
+    const item = pendingDeleteItem.value
+    pendingDeleteItem.value = null
+
+    if (!data.success) {
+      showToast(translateError(data.errorCode, data.errorDetail, t('alert.deleteFailed', { error: data.errorMessage })))
+      return
+    }
+
+    const confirmed = await askConfirm(t('confirm.deleteWarning', { name: item?.originalName ?? '' }), {
+      confirmLabel: t('list.delete'),
+      variant: 'danger'
+    })
+    if (!confirmed) {
+      return
+    }
+    window.chrome.webview.postMessage({ type: 'deleteRecord', uuid: data.uuid })
   },
 
   pathPickCancelled(data) {
@@ -818,6 +857,10 @@ function removeEncryptPath(index) {
   encryptPaths.value.splice(index, 1)
 }
 
+function clearEncryptPaths() {
+  encryptPaths.value = []
+}
+
 /// 拖放檔案：一般的 postMessage 只能傳可以轉成 JSON 的資料，瀏覽器沙盒化的 File 物件本身
 /// 沒有真正的磁碟路徑可以序列化。WebView2 專門為此開了 postMessageWithAdditionalObjects
 /// 這個管道，讓我們可以把 File 物件原封不動連同訊息一起送到 C# 那邊，C# 端會收到對應的
@@ -906,6 +949,11 @@ async function submitEncrypt() {
   })
 }
 
+function finishEncryptBatch() {
+  encryptStepDirection.value = 'backward'
+  encryptStep.value = 1
+}
+
 function submitDecrypt() {
   if (!decryptPath.value || !decryptPassword.value) {
     decryptResultIsError.value = true
@@ -962,6 +1010,9 @@ function submitPasswordPrompt() {
       uuids: ctx.group.items.map((i) => i.uuid),
       password
     })
+  } else if (ctx.mode === 'delete') {
+    pendingDeleteItem.value = ctx.item
+    window.chrome.webview.postMessage({ type: 'verifyPasswordForDelete', uuid: ctx.item.uuid, password })
   } else {
     decryptingUuids.value.add(ctx.item.uuid)
     window.chrome.webview.postMessage({ type: 'decryptByUuid', uuid: ctx.item.uuid, password, destinationDir: ctx.destinationDir })
@@ -1087,15 +1138,12 @@ function closeRecoveryKeyDisplay() {
   recoveryKeySaveState.value = ''
 }
 
-async function requestDelete(item) {
-  const confirmed = await askConfirm(t('confirm.deleteWarning', { name: item.originalName }), {
-    confirmLabel: t('list.delete'),
-    variant: 'danger'
-  })
-  if (!confirmed) {
-    return
-  }
-  window.chrome.webview.postMessage({ type: 'deleteRecord', uuid: item.uuid })
+// 永久刪除前要求重新輸入密碼（重用密碼輸入彈窗，見 submitPasswordPrompt 的 'delete' 分支）——
+// 光按一次確認鍵沒辦法證明按下永久刪除的人真的知道密碼，這個動作又是不可逆的，門檻要跟
+// 解密一樣高。
+function requestDelete(item) {
+  passwordPromptContext.value = { mode: 'delete', item }
+  passwordPromptValue.value = ''
 }
 
 function handleDeleteRecordResult(data) {
@@ -1205,16 +1253,11 @@ function historyDetailText(entry) {
             <svg class="page-title__icon" viewBox="0 0 24 24" fill="none"><path d="M6 10V8a6 6 0 1 1 12 0v2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="4" y="10" width="16" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="15" r="1.6" fill="currentColor"/></svg>
             {{ t('encrypt.title') }}
           </h1>
-          <p class="step-indicator">{{ t('encrypt.stepIndicator', { step: encryptStep, total: 2 }) }}</p>
+          <p v-if="encryptStep !== 3" class="step-indicator">{{ t('encrypt.stepIndicator', { step: encryptStep, total: 2 }) }}</p>
 
           <Transition :name="encryptStepDirection === 'forward' ? 'step-forward' : 'step-backward'" mode="out-in">
           <div v-if="encryptStep === 1" key="step1">
             <div class="field">
-              <label class="field__label">{{ t('encrypt.itemsLabel') }}</label>
-              <div class="button-row">
-                <button class="button button--secondary" @click="pickFile" type="button">{{ t('encrypt.pickFiles') }}</button>
-                <button class="button button--secondary" @click="pickFolder" type="button">{{ t('encrypt.pickFolder') }}</button>
-              </div>
               <div
                 v-if="encryptPaths.length === 0"
                 class="dropzone"
@@ -1225,13 +1268,26 @@ function historyDetailText(entry) {
               >
                 <svg class="dropzone__icon" viewBox="0 0 24 24" fill="none"><path d="M12 4v11m0-11 4 4m-4-4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 16v2.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
                 <p class="dropzone__text">{{ t('encrypt.dropHint') }}</p>
+                <div class="dropzone__actions">
+                  <button class="button button--secondary" @click="pickFile" type="button">{{ t('encrypt.pickFiles') }}</button>
+                  <button class="button button--secondary" @click="pickFolder" type="button">{{ t('encrypt.pickFolder') }}</button>
+                </div>
               </div>
-              <ul v-else class="item-list">
-                <li v-for="(path, index) in encryptPaths" :key="path" class="item-list__row">
-                  <span class="item-list__path" :title="path">{{ path }}</span>
-                  <button class="link-button" @click="removeEncryptPath(index)" type="button">{{ t('encrypt.remove') }}</button>
-                </li>
-              </ul>
+              <div v-else class="picked-items-card">
+                <TransitionGroup name="item-list-row" tag="ul" class="item-list">
+                  <li v-for="(path, index) in encryptPaths" :key="path" class="item-list__row">
+                    <span class="item-list__path" :title="path">{{ path }}</span>
+                    <button class="link-button" @click="removeEncryptPath(index)" type="button">{{ t('encrypt.remove') }}</button>
+                  </li>
+                </TransitionGroup>
+                <div class="picked-items-card__actions">
+                  <div class="picked-items-card__actions-group">
+                    <button class="link-button" @click="pickFile" type="button">{{ t('encrypt.pickFiles') }}</button>
+                    <button class="link-button" @click="pickFolder" type="button">{{ t('encrypt.pickFolder') }}</button>
+                  </div>
+                  <button v-if="encryptPaths.length > 1" class="link-button link-button--danger" @click="clearEncryptPaths" type="button">{{ t('encrypt.removeAll') }}</button>
+                </div>
+              </div>
             </div>
 
             <button class="button button--primary" @click="encryptStepDirection = 'forward'; encryptStep = 2" :disabled="encryptPaths.length === 0">
@@ -1239,7 +1295,7 @@ function historyDetailText(entry) {
             </button>
           </div>
 
-          <div v-else key="step2">
+          <div v-else-if="encryptStep === 2" key="step2">
             <div class="field">
               <label class="field__label">{{ t('encrypt.passwordLabel') }}</label>
               <div class="password-field">
@@ -1263,7 +1319,7 @@ function historyDetailText(entry) {
               </div>
               <!-- 不做強度判斷（強度高低跟好不好記是兩件事，沒辦法從字串本身判斷使用者記不記得住）；
                    只要恢復金鑰沒開，就用位置接近性提醒兩者的關聯，不對密碼本身評價。 -->
-              <p v-if="!enableRecoveryKey" class="hint-text">{{ t('encrypt.recoveryKeyReminder') }}</p>
+              <p v-if="!enableRecoveryKey && encryptPaths.length <= 1" class="hint-text">{{ t('encrypt.recoveryKeyReminder') }}</p>
             </div>
 
             <div class="field">
@@ -1326,6 +1382,28 @@ function historyDetailText(entry) {
                 </span>
               </div>
             </TransitionGroup>
+          </div>
+
+          <div v-else key="step3">
+            <div class="encrypt-complete">
+              <svg class="encrypt-complete__icon" viewBox="0 0 24 24" fill="none"><path d="M5 13l4 4L19 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <p class="encrypt-complete__title">{{ t('encrypt.completeTitle') }}</p>
+            </div>
+
+            <TransitionGroup name="result-row" tag="div" class="result-list">
+              <div v-for="(item, index) in encryptItemResults" :key="index" class="result-row" :class="item.success ? 'result-row--success' : 'result-row--error'">
+                <span class="result-row__icon">{{ item.success ? '✓' : '✕' }}</span>
+                <span>
+                  <template v-if="item.path">{{ item.path }}</template>
+                  <span v-if="item.errorMessage"> — {{ item.errorMessage }}</span>
+                  <span v-if="item.note"> — {{ item.note }}</span>
+                </span>
+              </div>
+            </TransitionGroup>
+
+            <button class="button button--primary" @click="finishEncryptBatch" type="button">
+              {{ t('encrypt.done') }}
+            </button>
           </div>
           </Transition>
         </div>
@@ -1403,6 +1481,7 @@ function historyDetailText(entry) {
               <table class="table table--auto">
                 <thead>
                   <tr>
+                    <th></th>
                     <th>{{ t('list.colName') }}</th>
                     <th>{{ t('list.colType') }}</th>
                     <th>{{ t('list.colSize') }}</th>
@@ -1413,6 +1492,7 @@ function historyDetailText(entry) {
                 </thead>
                 <tbody>
                   <tr v-for="n in 8" :key="n">
+                    <td><span class="skeleton-block" style="width: 20px;"></span></td>
                     <td><span class="skeleton-block" style="width: 70%;"></span></td>
                     <td><span class="skeleton-block" style="width: 50%;"></span></td>
                     <td><span class="skeleton-block" style="width: 40%;"></span></td>
@@ -1428,6 +1508,7 @@ function historyDetailText(entry) {
               <table class="table table--auto">
                 <thead>
                   <tr>
+                    <th></th>
                     <th>{{ t('list.colName') }}</th>
                     <th>{{ t('list.colType') }}</th>
                     <th>{{ t('list.colSize') }}</th>
@@ -1440,6 +1521,11 @@ function historyDetailText(entry) {
                   <template v-for="group in groupedVaultItems" :key="group.isGroup ? group.batchId : group.item.uuid">
                     <!-- 獨立項目（沒有 batchId）：跟之前一樣直接顯示一列。 -->
                     <tr v-if="!group.isGroup">
+                      <td class="table__delete-cell">
+                        <button class="row-delete-button" @click="requestDelete(group.item)" type="button" :aria-label="t('list.delete')" :title="t('list.delete')">
+                          <svg viewBox="0 0 24 24" fill="none"><path d="M5 7h14M10 11v6M14 11v6M7 7l1-3a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1l1 3M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        </button>
+                      </td>
                       <td>
                         <div class="cell-name" :title="group.item.originalName">{{ group.item.originalName }}</div>
                         <span v-if="group.item.hasNestedLocks" class="badge" :title="t('list.nestedLockTitle')">🔒 ×{{ group.item.nestedLockCount }}</span>
@@ -1474,7 +1560,6 @@ function historyDetailText(entry) {
                             <img :src="recoveryKeyIconUrl" alt="" class="button__icon" />
                             {{ t('decrypt.recoveryKeyUnlock') }}
                           </button>
-                          <button class="link-button link-button--danger" @click="requestDelete(group.item)" type="button">{{ t('list.delete') }}</button>
                         </div>
                       </td>
                     </tr>
@@ -1482,7 +1567,7 @@ function historyDetailText(entry) {
                     <!-- 批次群組：一次選多個項目加密出來的，摺疊成一列，展開後每個項目維持獨立操作能力。 -->
                     <template v-else>
                       <tr class="group-row">
-                        <td colspan="6">
+                        <td colspan="7">
                           <div class="group-row__inner">
                             <button class="group-row__toggle" @click="toggleGroupExpanded(group.batchId)" type="button">
                               <span class="group-row__chevron" :class="{ 'is-expanded': expandedGroups.has(group.batchId) }">▸</span>
@@ -1501,6 +1586,11 @@ function historyDetailText(entry) {
                       </tr>
                       <template v-if="expandedGroups.has(group.batchId)">
                         <tr v-for="item in group.items" :key="item.uuid" class="table__row--nested">
+                          <td class="table__delete-cell">
+                            <button class="row-delete-button" @click="requestDelete(item)" type="button" :aria-label="t('list.delete')" :title="t('list.delete')">
+                              <svg viewBox="0 0 24 24" fill="none"><path d="M5 7h14M10 11v6M14 11v6M7 7l1-3a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1l1 3M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                            </button>
+                          </td>
                           <td>
                             <div class="cell-name" :title="item.originalName">{{ item.originalName }}</div>
                             <span v-if="item.hasNestedLocks" class="badge" :title="t('list.nestedLockTitle')">🔒 ×{{ item.nestedLockCount }}</span>
@@ -1535,7 +1625,6 @@ function historyDetailText(entry) {
                                 <img :src="recoveryKeyIconUrl" alt="" class="button__icon" />
                                 {{ t('decrypt.recoveryKeyUnlock') }}
                               </button>
-                              <button class="link-button link-button--danger" @click="requestDelete(item)" type="button">{{ t('list.delete') }}</button>
                             </div>
                           </td>
                         </tr>
@@ -1614,7 +1703,7 @@ function historyDetailText(entry) {
 
         <div v-else-if="activeTab === 'settings'" key="settings">
           <h1 class="page-title">
-            <svg class="page-title__icon" viewBox="0 0 24 24" fill="none"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" stroke="currentColor" stroke-width="1.8"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            <svg class="page-title__icon" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.7"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
             {{ t('settings.title') }}
           </h1>
 
@@ -1769,8 +1858,9 @@ function historyDetailText(entry) {
     <Transition name="modal">
       <div v-if="passwordPromptContext" class="modal-overlay">
         <div class="modal">
-          <h2 class="modal__title">{{ t('passwordPrompt.title') }}</h2>
-          <p v-if="passwordPromptContext.mode === 'single'" class="modal__subtitle">{{ t('passwordPrompt.unlockSingle', { name: passwordPromptContext.item.originalName }) }}</p>
+          <h2 class="modal__title">{{ passwordPromptContext.mode === 'delete' ? t('list.delete') : t('passwordPrompt.title') }}</h2>
+          <p v-if="passwordPromptContext.mode === 'delete'" class="modal__subtitle">{{ t('confirm.deletePasswordPrompt', { name: passwordPromptContext.item.originalName }) }}</p>
+          <p v-else-if="passwordPromptContext.mode === 'single'" class="modal__subtitle">{{ t('passwordPrompt.unlockSingle', { name: passwordPromptContext.item.originalName }) }}</p>
           <p v-else class="modal__subtitle">{{ t('passwordPrompt.unlockBatch', { count: passwordPromptContext.group.items.length, preview: batchPreviewText(passwordPromptContext.group.items) }) }}</p>
           <input
             ref="passwordPromptInputRef"
@@ -1781,7 +1871,15 @@ function historyDetailText(entry) {
           />
           <div class="modal__footer">
             <button class="button button--secondary" @click="cancelPasswordPrompt" type="button">{{ t('passwordPrompt.cancel') }}</button>
-            <button class="button button--primary" @click="submitPasswordPrompt" type="button" :disabled="!passwordPromptValue">{{ t('passwordPrompt.unlock') }}</button>
+            <button
+              class="button"
+              :class="passwordPromptContext.mode === 'delete' ? 'button--danger' : 'button--primary'"
+              @click="submitPasswordPrompt"
+              type="button"
+              :disabled="!passwordPromptValue"
+            >
+              {{ passwordPromptContext.mode === 'delete' ? t('list.delete') : t('passwordPrompt.unlock') }}
+            </button>
           </div>
         </div>
       </div>
@@ -2103,6 +2201,29 @@ body {
   text-align: left;
 }
 
+/* 加密完成頁（步驟三）的標題區——置中的打勾圖示＋文字，跟前兩步的表單排版做出區別。 */
+.encrypt-complete {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+  text-align: center;
+}
+
+.encrypt-complete__icon {
+  width: 40px;
+  height: 40px;
+  color: var(--color-accent);
+}
+
+.encrypt-complete__title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0;
+}
+
 /* ---- 表單欄位 ---- */
 .field {
   margin-bottom: 1.375rem;
@@ -2416,6 +2537,7 @@ textarea.text-input {
 
 /* ---- 加密項目清單／結果 ---- */
 .item-list {
+  position: relative; /* TransitionGroup 的 leave-active 用 absolute 定位時需要一個定位錨點 */
   list-style: none;
   margin: 0.6rem 0 0;
   padding: 0;
@@ -2438,6 +2560,32 @@ textarea.text-input {
   border-bottom: none;
 }
 
+/* 已選檔案清單的進出場：跟 .result-row 同一套風格（純 opacity + 小幅位移，ease-out），
+   移除一筆時其餘列用 TransitionGroup 內建的 move 過渡滑上去補位，不是瞬間跳掉。 */
+.item-list-row-enter-active,
+.item-list-row-leave-active {
+  transition: transform var(--duration-base) var(--ease-out), opacity var(--duration-base) var(--ease-out);
+}
+
+.item-list-row-move {
+  transition: transform var(--duration-base) var(--ease-out);
+}
+
+.item-list-row-enter-from {
+  opacity: 0;
+  transform: translateY(-4px) scale(0.98);
+}
+
+.item-list-row-leave-to {
+  opacity: 0;
+  transform: translateX(12px);
+}
+
+.item-list-row-leave-active {
+  position: absolute;
+  width: 100%;
+}
+
 .item-list__path {
   font-family: var(--font-mono);
   font-size: 0.8rem;
@@ -2458,10 +2606,17 @@ textarea.text-input {
 }
 
 /* 拖放區：加密頁籤還沒選任何項目時顯示，本身也是拖放檔案的目標區域，
-   拖著檔案進入視窗時（isDraggingFile）邊框跟背景會亮起來給明確的視覺回饋。 */
+   拖著檔案進入視窗時（isDraggingFile）邊框跟背景會亮起來給明確的視覺回饋。
+   刻意做成佔滿步驟一大半版面的主視覺卡片（而不是表單裡的一個欄位）——
+   「選擇檔案／選擇資料夾」也收進卡片內部，變成卡片自己的次要動作。 */
 .dropzone {
   margin-top: 0.6rem;
+  min-height: 280px;
   padding: 2.5rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   border: 1.5px dashed var(--color-border-strong);
   border-radius: var(--radius-md);
   text-align: center;
@@ -2474,10 +2629,10 @@ textarea.text-input {
 }
 
 .dropzone__icon {
-  width: 32px;
-  height: 32px;
+  width: 40px;
+  height: 40px;
   color: var(--color-text-tertiary);
-  margin-bottom: 0.6rem;
+  margin-bottom: 0.75rem;
   transition: color var(--duration-fast) ease;
 }
 
@@ -2491,6 +2646,37 @@ textarea.text-input {
   margin: 0;
   line-break: strict;
   text-wrap: pretty;
+}
+
+.dropzone__actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+}
+
+/* 已選取檔案的狀態：實線邊框（相對拖放框的虛線）表達「已經確定選取」，
+   維持跟 .dropzone 相近的最小高度，避免空狀態／已選取狀態切換時版面高度跳動。 */
+.picked-items-card {
+  margin-top: 0.6rem;
+  min-height: 280px;
+  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  border: 1.5px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+}
+
+.picked-items-card__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.picked-items-card__actions-group {
+  display: flex;
+  gap: 0.5rem;
 }
 
 /* 清單類頁面（已加密清單／使用紀錄）的空狀態：不是拖放目標，單純告知「目前沒有內容」，
@@ -2541,7 +2727,7 @@ textarea.text-input {
 }
 
 .result-list {
-  margin-top: 1.25rem;
+  margin: 1.25rem 0;
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
@@ -2730,7 +2916,8 @@ textarea.text-input {
   background: var(--color-surface);
 }
 
-.table--auto td:last-child {
+.table--auto td:last-child,
+.table--auto td:first-child {
   width: 1%;
   white-space: nowrap;
 }
@@ -2817,6 +3004,46 @@ textarea.text-input {
   flex-direction: column;
   align-items: stretch;
   gap: 0.4rem;
+}
+
+/* 永久刪除整個搬到每一列最前面獨立一欄（見 .row-delete-button），不再跟解鎖方式的
+   按鈕群組共用同一欄——空間上完全分開，比同一欄裡加分隔線更明確。 */
+.table__delete-cell {
+  padding-left: 0.6rem !important;
+  padding-right: 0.4rem !important;
+  vertical-align: top;
+}
+
+/* 沿用 .link-button--danger 的既有慣例：預設就帶一點危險色（降低透明度，不刺眼），
+   hover 提升到完整不透明——全程不加背景色塊，避免跟列本身 hover 時的背景色疊加打架。 */
+.row-delete-button {
+  appearance: none;
+  display: inline-flex;
+  /* 圖示對齊按鈕頂端，不是置中——按鈕本身比圖示高（28px vs 16px），置中的話圖示會
+     比同一列名稱欄位的文字第一行低了快一半按鈕高度的空隙，看起來沒對齊。頂端對齊後
+     圖示緊貼儲存格頂端留白又比文字稍微高了一點點，補一點點 padding-top 往下推回去，
+     跟文字第一行的視覺基準對齊。 */
+  align-items: flex-start;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 2px 0 0;
+  border: none;
+  background: none;
+  color: var(--color-danger);
+  opacity: 0.75;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: opacity var(--duration-fast) ease;
+}
+
+.row-delete-button:hover {
+  opacity: 1;
+}
+
+.row-delete-button svg {
+  width: 16px;
+  height: 16px;
 }
 
 /* 直向堆疊時，按鈕內容統一靠左對齊，視覺上才會像一組整齊的清單而不是散落的方塊。 */
@@ -3228,6 +3455,15 @@ textarea.text-input {
 
   .result-row-enter-from {
     transform: none;
+  }
+
+  .item-list-row-enter-from,
+  .item-list-row-leave-to {
+    transform: none;
+  }
+
+  .item-list-row-move {
+    transition: none;
   }
 
   .tab-page-enter-active,
