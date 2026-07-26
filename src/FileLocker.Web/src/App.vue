@@ -114,6 +114,11 @@ function resolveChoiceDialog(value) {
 const activeTab = ref('encrypt')
 const activeListSubTab = ref('files') // 'files' | 'history'
 
+// .page 的寬度（page--wide）要延到 tab-page 過渡完全透明的瞬間才切換，
+// 不能直接跟 activeTab 綁在一起——否則點分頁的當下寬度就先跳掉，
+// 舊內容還沒開始淡出就已經被塞進新寬度的容器。
+const pageWidthTab = ref(activeTab.value)
+
 // ---- 頁籤下方會滑動的指示條：量測目前作用中頁籤按鈕的實際位置/寬度，讓指示條動畫過去，
 // 而不是每個按鈕各自套用固定的底線樣式（那樣切換時只會「跳」過去，沒有滑動的感覺）。
 const tabBarRefs = {}
@@ -208,6 +213,9 @@ const isChangingVaultPath = ref(false)
 // 兩者視覺權重差很多（一個是必經流程，一個是偶爾用得到的進階功能），分開後主線操作
 // 不會被一長串表單稀釋掉。 ----
 const encryptStep = ref(1) // 1 | 2
+// 「下一步」「上一步」要往相反方向滑動（從哪裡來就從哪裡回去），這個狀態決定
+// <Transition> 套哪一組方向性的 enter/leave class，見下面 encryptStep 那段模板。
+const encryptStepDirection = ref('forward') // 'forward' | 'backward'
 const encryptPaths = ref([])
 const isDraggingFile = ref(false) // 拖著檔案進入視窗範圍時為 true，見 MainWindow.xaml.cs 的拖放事件說明
 const encryptPassword = ref('')
@@ -1190,15 +1198,17 @@ function historyDetailText(entry) {
     </nav>
 
     <div class="page-wrapper">
-      <main class="page" :class="{ 'page--wide': activeTab === 'list' }">
-        <div v-if="activeTab === 'encrypt'">
+      <main class="page" :class="{ 'page--wide': pageWidthTab === 'list' }">
+        <Transition name="tab-page" mode="out-in" @before-enter="pageWidthTab = activeTab">
+        <div v-if="activeTab === 'encrypt'" key="encrypt">
           <h1 class="page-title">
             <svg class="page-title__icon" viewBox="0 0 24 24" fill="none"><path d="M6 10V8a6 6 0 1 1 12 0v2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="4" y="10" width="16" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="15" r="1.6" fill="currentColor"/></svg>
             {{ t('encrypt.title') }}
           </h1>
           <p class="step-indicator">{{ t('encrypt.stepIndicator', { step: encryptStep, total: 2 }) }}</p>
 
-          <div v-if="encryptStep === 1">
+          <Transition :name="encryptStepDirection === 'forward' ? 'step-forward' : 'step-backward'" mode="out-in">
+          <div v-if="encryptStep === 1" key="step1">
             <div class="field">
               <label class="field__label">{{ t('encrypt.itemsLabel') }}</label>
               <div class="button-row">
@@ -1224,12 +1234,12 @@ function historyDetailText(entry) {
               </ul>
             </div>
 
-            <button class="button button--primary" @click="encryptStep = 2" :disabled="encryptPaths.length === 0">
+            <button class="button button--primary" @click="encryptStepDirection = 'forward'; encryptStep = 2" :disabled="encryptPaths.length === 0">
               {{ t('encrypt.next') }}
             </button>
           </div>
 
-          <div v-else>
+          <div v-else key="step2">
             <div class="field">
               <label class="field__label">{{ t('encrypt.passwordLabel') }}</label>
               <div class="password-field">
@@ -1292,7 +1302,7 @@ function historyDetailText(entry) {
             </div>
 
             <div class="button-row">
-              <button class="button button--secondary" @click="encryptStep = 1" :disabled="isEncrypting" type="button">
+              <button class="button button--secondary" @click="encryptStepDirection = 'backward'; encryptStep = 1" :disabled="isEncrypting" type="button">
                 {{ t('encrypt.back') }}
               </button>
               <button class="button button--primary" @click="submitEncrypt" :disabled="isEncrypting">
@@ -1317,9 +1327,10 @@ function historyDetailText(entry) {
               </div>
             </TransitionGroup>
           </div>
+          </Transition>
         </div>
 
-        <div v-else-if="activeTab === 'decrypt'">
+        <div v-else-if="activeTab === 'decrypt'" key="decrypt">
           <h1 class="page-title">
             <svg class="page-title__icon" viewBox="0 0 24 24" fill="none"><path d="M6 10V8a6 6 0 0 1 11.2-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="4" y="10" width="16" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="15" r="1.6" fill="currentColor"/></svg>
             {{ t('decrypt.title') }}
@@ -1361,7 +1372,7 @@ function historyDetailText(entry) {
           </p>
         </div>
 
-        <div v-else-if="activeTab === 'list'">
+        <div v-else-if="activeTab === 'list'" key="list">
           <h1 class="page-title">
             <svg class="page-title__icon" viewBox="0 0 24 24" fill="none"><path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
             {{ t('list.title') }}
@@ -1601,7 +1612,7 @@ function historyDetailText(entry) {
           </div>
         </div>
 
-        <div v-else-if="activeTab === 'settings'">
+        <div v-else-if="activeTab === 'settings'" key="settings">
           <h1 class="page-title">
             <svg class="page-title__icon" viewBox="0 0 24 24" fill="none"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" stroke="currentColor" stroke-width="1.8"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
             {{ t('settings.title') }}
@@ -1646,6 +1657,7 @@ function historyDetailText(entry) {
 
           <p v-if="settingsSaveMessage" class="status-message status-message--success">{{ settingsSaveMessage }}</p>
         </div>
+        </Transition>
       </main>
     </div>
 
@@ -2047,7 +2059,9 @@ body {
   width: 100%;
   padding: 2rem 2.5rem 3rem;
   text-align: left;
-  transition: max-width var(--duration-base) var(--ease-out);
+  /* 刻意不對 max-width 做過渡——分頁切換時內容本身已經有 .tab-page 淡入淡出，寬度如果
+     也跟著平滑放大/縮小，兩個動畫疊在一起會變成「內容還看得到、框卻在動」的縮放感，
+     混亂。讓寬度乾脆瞬間跳過去，切換的那一刻剛好也是內容淡到看不見的時候，感覺不出來。 */
 }
 
 /* 表單類頁面（加密／解密／設定）刻意維持適中寬度——密碼欄位、勾選項這種內容，
@@ -2546,6 +2560,45 @@ textarea.text-input {
 .result-row-enter-from {
   opacity: 0;
   transform: translateY(-4px) scale(0.98);
+}
+
+/* 分頁切換：分頁是這個 App 裡數一數二高頻的操作，動畫份量刻意壓到最低——只用快速的
+   純透明度淡入淡出，不加位移，求「不死板」而不是「有存在感」。 */
+.tab-page-enter-active,
+.tab-page-leave-active {
+  transition: opacity 120ms ease;
+}
+.tab-page-enter-from,
+.tab-page-leave-to {
+  opacity: 0;
+}
+
+/* 加密步驟切換：偶爾、慎重的操作，用跟 .modal／.toast 同一套節奏（--duration-base + --ease-out）
+   維持整體一致性。有方向性——從哪裡來就從哪裡回去：下一步往左（舊內容往左淡出、新內容從
+   右邊進來，兩者都往左，像同一條輸送帶）；上一步完全相反。 */
+.step-forward-enter-active,
+.step-forward-leave-active,
+.step-backward-enter-active,
+.step-backward-leave-active {
+  transition: opacity var(--duration-base) var(--ease-out), transform var(--duration-base) var(--ease-out);
+}
+
+.step-forward-leave-to {
+  opacity: 0;
+  transform: translateX(-16px);
+}
+.step-forward-enter-from {
+  opacity: 0;
+  transform: translateX(16px);
+}
+
+.step-backward-leave-to {
+  opacity: 0;
+  transform: translateX(16px);
+}
+.step-backward-enter-from {
+  opacity: 0;
+  transform: translateX(-16px);
 }
 
 .result-row--success {
@@ -3174,6 +3227,22 @@ textarea.text-input {
   }
 
   .result-row-enter-from {
+    transform: none;
+  }
+
+  .tab-page-enter-active,
+  .tab-page-leave-active,
+  .step-forward-enter-active,
+  .step-forward-leave-active,
+  .step-backward-enter-active,
+  .step-backward-leave-active {
+    transition: none;
+  }
+
+  .step-forward-enter-from,
+  .step-forward-leave-to,
+  .step-backward-enter-from,
+  .step-backward-leave-to {
     transform: none;
   }
 
