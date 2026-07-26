@@ -1,3 +1,4 @@
+using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Text.Json;
 using FileLocker.Core.Models;
@@ -57,8 +58,40 @@ public class VaultManager
 
         var json = JsonSerializer.Serialize(newConfig, JsonOptions);
         File.WriteAllText(ConfigPath, json);
+        RestrictToCurrentUser(ConfigPath);
 
         return newConfig;
+    }
+
+    /// <summary>
+    /// 這把簽章金鑰是 .locked 指標檔偽造防護的唯一防線（見 LockedMarkerFile.VerifySignature），
+    /// 明文放在 Vault 資料夾裡預設會繼承父目錄的 ACL——同一台機器、同一使用者底下能執行的任何
+    /// 程式理論上都讀得到。這裡收緊成只有目前使用者帳號能讀寫，不繼承父目錄權限，降低金鑰
+    /// 被其他本機程式偷看、進而偽造出能通過簽章驗證的標記檔的風險。
+    /// 只能在 Windows 上生效（ACL 是 Windows 概念），失敗（例如檔案系統不支援 ACL）就放棄，
+    /// 不影響金鑰本身已經寫入成功這件事。
+    /// </summary>
+    private static void RestrictToCurrentUser(string path)
+    {
+        try
+        {
+            var fileInfo = new FileInfo(path);
+            var security = fileInfo.GetAccessControl();
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+
+            var currentUser = System.Security.Principal.WindowsIdentity.GetCurrent().User;
+            if (currentUser is not null)
+            {
+                security.SetAccessRule(new FileSystemAccessRule(
+                    currentUser, FileSystemRights.FullControl, AccessControlType.Allow));
+            }
+
+            fileInfo.SetAccessControl(security);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or PlatformNotSupportedException or IOException)
+        {
+            // 盡力而為：收緊權限失敗不該讓 Vault 整個無法初始化，金鑰本身已經正常寫入了。
+        }
     }
 
     public void SaveMetadata(LockedItemMetadata metadata)

@@ -220,6 +220,15 @@ public partial class MainWindow : Window
                 }
             };
 
+            // 擋掉 window.open()／target="_blank" 開新視窗：WebView2 預設會直接跳出一個完全不受
+            // 上面 NavigationStarting 限制的獨立 Chromium 彈出視窗。這個應用不需要彈出視窗功能，
+            // 全部擋掉——就算前端未來哪個相依套件出問題被注入惡意腳本，也沒辦法藉此跳出一個
+            // 能導覽到任意網址的視窗。
+            MainWebView.CoreWebView2.NewWindowRequested += (_, newWindowArgs) =>
+            {
+                newWindowArgs.Handled = true;
+            };
+
 #if DEBUG
             // Debug 建置：連到 Vite 開發伺服器，需要另外開一個終端機跑 npm run dev。
             MainWebView.CoreWebView2.Navigate("http://localhost:5173/");

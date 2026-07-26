@@ -41,7 +41,19 @@ public class LockedMarkerFile
         try
         {
             var json = File.ReadAllText(path);
-            return JsonSerializer.Deserialize<LockedMarkerFile>(json);
+            var marker = JsonSerializer.Deserialize<LockedMarkerFile>(json);
+
+            // Uuid 之後會被直接拿去組 Vault 內 {uuid}.enc / {uuid}.meta.json 的檔案路徑
+            // （見 VaultManager.EncPath/MetaPath），指標檔內容本身又是未經信任的輸入
+            // （只有簽章能保證沒被竄改，但驗證簽章是呼叫端的責任，不是這裡）——防禦深度起見，
+            // 格式一律先驗證是合法 GUID，不是就當成解析失敗處理，避免非 GUID 字串
+            // （例如含路徑分隔符/「..」）被當成路徑的一部分。
+            if (marker is not null && !Guid.TryParse(marker.Uuid, out _))
+            {
+                return null;
+            }
+
+            return marker;
         }
         catch (JsonException)
         {

@@ -61,11 +61,12 @@ static std::wstring QuoteArgument(const std::wstring& argument)
 }
 
 /// <summary>
-/// 找 FileLocker.App.exe 在哪裡：先試跟這個 Shell Extension DLL 放在同一個資料夾——
+/// 找 FileLocker.App.exe 在哪裡：跟這個 Shell Extension DLL 放在同一個資料夾——
 /// 正式安裝後兩者會被安裝程式放在同一個「應用程式內容資料夾」裡（見規格文件第 5.2、13 節），
-/// 這個檢查在正式版就是唯一會用到的路徑，不需要再讀任何登錄檔。
-/// 找不到才退回開發階段的暫時路徑，直接指向 dotnet build 產生的執行檔位置，方便還沒打包安裝檔
-/// 之前用 dev build 測試。
+/// 開發階段用 regsvr32 手動註冊測試時，也是先手動把編譯出來的 DLL 複製到跟 FileLocker.App.exe
+/// 同一個資料夾（見 FileLocker.App.csproj 的 CopyShellExtensionDll Target），所以這一條路徑
+/// 涵蓋開發與正式兩種情境，不需要另外寫死本機開發路徑當備援（那個路徑只在特定一台機器上有效，
+/// 而且會把開發機的資料夾結構打包進正式發行的 DLL 裡，沒必要）。
 /// </summary>
 static std::wstring GetFileLockerAppPath()
 {
@@ -82,12 +83,6 @@ static std::wstring GetFileLockerAppPath()
     if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
     {
         return candidate;
-    }
-
-    std::wstring devPath = L"D:\\FileLocker_專案\\FileLocker\\src\\FileLocker.App\\bin\\Debug\\net10.0-windows10.0.19041.0\\FileLocker.App.exe";
-    if (GetFileAttributesW(devPath.c_str()) != INVALID_FILE_ATTRIBUTES)
-    {
-        return devPath;
     }
 
     return L"";
