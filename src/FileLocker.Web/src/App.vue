@@ -20,6 +20,12 @@ import lockLightUrl from './assets/Lock_Light.svg'
 import lockDarkUrl from './assets/Lock_Dark.svg'
 import warningLightUrl from './assets/Warning_Light.svg'
 import warningDarkUrl from './assets/Warning_Dark.svg'
+import { sendMessage, requestMessage, resolvePending } from './composables/useIpc.js'
+import {
+  groupVaultItems,
+  batchPreviewText as batchPreviewTextPure,
+  nestedLockPreviewText as nestedLockPreviewTextPure
+} from './vaultListProjections.js'
 
 // ---- 多語言：目前支援繁體中文／英文，語言包放在 locales/ 底下的 JSON 檔。
 // t() 找不到對應的語言檔或找不到 key 時，會退回繁體中文，再找不到就直接顯示 key 本身
@@ -193,15 +199,15 @@ onUnmounted(() => {
 const isWindowMaximized = ref(false)
 
 function minimizeWindow() {
-  window.chrome.webview.postMessage({ type: 'windowMinimize' })
+  sendMessage('windowMinimize')
 }
 
 function toggleMaximizeWindow() {
-  window.chrome.webview.postMessage({ type: 'windowMaximizeToggle' })
+  sendMessage('windowMaximizeToggle')
 }
 
 function closeWindow() {
-  window.chrome.webview.postMessage({ type: 'windowClose' })
+  sendMessage('windowClose')
 }
 
 // ---- 設定頁籤 ----
@@ -252,23 +258,15 @@ let progressAnimationFrame = null
 let progressStartedAt = 0
 let progressEstimatedDurationMs = 0
 let progressCompressionMs = 0
-let pathSizesResolve = null
 
 function requestPathSizes(paths) {
-  return new Promise((resolve) => {
-    pathSizesResolve = resolve
-    window.chrome.webview.postMessage({ type: 'getPathSizes', paths })
-  })
+  return requestMessage('getPathSizes', 'pathSizesResult', { paths })
 }
 
 // 加密前掃描選取項目裡有沒有巢狀 .locked 檔案——純資訊性用途，數量只拿來顯示一個不擋
-// 流程的提示（見 submitEncrypt），不是像 pathSizesResolve 那樣影響進度條估算。
-let nestedLockCountResolve = null
+// 流程的提示（見 submitEncrypt），不是像 requestPathSizes 那樣影響進度條估算。
 function requestNestedLockCount(paths) {
-  return new Promise((resolve) => {
-    nestedLockCountResolve = resolve
-    window.chrome.webview.postMessage({ type: 'checkNestedLocks', paths })
-  })
+  return requestMessage('checkNestedLocks', 'nestedLockCheckResult', { paths })
 }
 
 // 粗略假設本機加密大概每秒能處理 80MB（含 Argon2 延展、串流加解密、安全清除原始檔案這些
@@ -435,6 +433,23 @@ function removeVaultItem(uuid) {
   vaultItems.value = vaultItems.value.filter((item) => item.uuid !== uuid)
 }
 
+// 對應架構審查（2026-07-27）：decryptResult／decryptByUuidResult／decryptByPasskeyResult／
+// decryptByRecoveryKeyResult 四個 handler 形狀完全一致（成功→做點清理+toast success，
+// 失敗→toast translateError），收斂成這一個共用函式，四個呼叫端只需要各自帶
+// onSuccess／successMessage／failureFallback。其餘看起來類似但形狀其實不同的 handler
+// （例如 verifyPasswordForDeleteResult 成功後接的是確認彈窗、handleDeleteRecordResult
+// 多一個 blockedByNestedLocks 分支）刻意不套用這個函式，硬塞會讓介面被迫變複雜。
+function handleOperationResult(data, { onSuccess, successMessage, failureFallback } = {}) {
+  if (data.success) {
+    onSuccess?.()
+    if (successMessage) {
+      showToast(successMessage, 'success')
+    }
+  } else {
+    showToast(translateError(data.errorCode, data.errorDetail, failureFallback))
+  }
+}
+
 // 對應架構審查（2026-07-26）：訊息分派從一長串 if-else 改成 { type: handler } 的對照表——
 // 新增一種訊息類型變成「在這個物件裡加一個 key」，不是「在共用鏈裡插隊」，鏈不會再無限變長。
 // 每個 handler 只做這一種訊息該做的事，彼此互不干擾，順序也不重要。
@@ -488,65 +503,68 @@ const messageHandlers = {
     // 跟 decryptByUuidResult／decryptByPasskeyResult／decryptByRecoveryKeyResult 用同一套
     // toast 通知（會自動消失），不再用頁籤裡的常駐訊息——常駐訊息不會自己消失，切走頁籤/
     // 切換語言/準備解下一個檔案時還留在原地，容易讓人誤以為是在講目前正在做的事。
-    if (data.success) {
-      showToast(t('decrypt.success', { path: data.restoredPath }), 'success')
-    } else {
-      showToast(translateError(data.errorCode, data.errorDetail, t('decrypt.failed', { error: data.errorMessage })))
-    }
-    // 密碼一律清掉。路徑跟「其他解鎖方式」資訊只有失敗時才留著——失敗通常是密碼打錯，
-    // 使用者想對同一個檔案重新輸入密碼，這種情況下路徑欄位跟 Passkey/恢復金鑰按鈕都還有效，
-    // 留著方便直接重試。成功的話這個項目已經解密消失了，路徑跟按鈕都該一起清掉，
-    // 不然會誤導使用者以為還能對一個已經不存在的東西重試。
+    handleOperationResult(data, {
+      successMessage: t('decrypt.success', { path: data.restoredPath }),
+      failureFallback: t('decrypt.failed', { error: data.errorMessage }),
+      // 路徑跟「其他解鎖方式」資訊只有失敗時才留著——失敗通常是密碼打錯，使用者想對同一個
+      // 檔案重新輸入密碼，這種情況下路徑欄位跟 Passkey/恢復金鑰按鈕都還有效，留著方便直接
+      // 重試。成功的話這個項目已經解密消失了，路徑跟按鈕都該一起清掉，不然會誤導使用者
+      // 以為還能對一個已經不存在的東西重試。
+      onSuccess: () => {
+        decryptPath.value = ''
+        decryptItemInfo.value = null
+      }
+    })
+    // 密碼一律清掉，不管成功或失敗，是敏感資料不該長時間留在畫面上。
     decryptPassword.value = ''
-    if (data.success) {
-      decryptPath.value = ''
-      decryptItemInfo.value = null
-    }
   },
 
   decryptByUuidResult(data) {
     decryptingUuids.value.delete(data.uuid)
-    if (data.success) {
-      removeVaultItem(data.uuid)
-      markLocalVaultMutation()
-      showToast(t('decrypt.success', { path: data.restoredPath }), 'success')
-    } else {
-      showToast(translateError(data.errorCode, data.errorDetail, t('decrypt.failed', { error: data.errorMessage })))
-    }
+    handleOperationResult(data, {
+      successMessage: t('decrypt.success', { path: data.restoredPath }),
+      failureFallback: t('decrypt.failed', { error: data.errorMessage }),
+      onSuccess: () => {
+        removeVaultItem(data.uuid)
+        markLocalVaultMutation()
+      }
+    })
   },
 
   decryptByPasskeyResult(data) {
     decryptingUuids.value.delete(data.uuid)
-    if (data.success) {
-      removeVaultItem(data.uuid)
-      markLocalVaultMutation()
-      // 這則訊息是「已加密清單頁」跟「解密頁籤」的 Passkey 按鈕共用的，成功後兩邊各自
-      // 該清掉的殘留資訊都要處理——清單頁清 vaultItems（上面那行），解密頁籤清路徑欄位
-      // 跟「其他解鎖方式」按鈕，只有這次成功的項目剛好就是解密頁籤正在顯示的那個才清，
-      // 用 uuid 比對確保不會誤清到不相關的狀態。
-      if (decryptItemInfo.value?.uuid === data.uuid) {
-        decryptPath.value = ''
-        decryptItemInfo.value = null
+    handleOperationResult(data, {
+      successMessage: t('alert.passkeyDecryptSuccess', { path: data.restoredPath }),
+      failureFallback: t('alert.passkeyDecryptFailed', { error: data.errorMessage }),
+      onSuccess: () => {
+        removeVaultItem(data.uuid)
+        markLocalVaultMutation()
+        // 這則訊息是「已加密清單頁」跟「解密頁籤」的 Passkey 按鈕共用的，成功後兩邊各自
+        // 該清掉的殘留資訊都要處理——清單頁清 vaultItems（上面那行），解密頁籤清路徑欄位
+        // 跟「其他解鎖方式」按鈕，只有這次成功的項目剛好就是解密頁籤正在顯示的那個才清，
+        // 用 uuid 比對確保不會誤清到不相關的狀態。
+        if (decryptItemInfo.value?.uuid === data.uuid) {
+          decryptPath.value = ''
+          decryptItemInfo.value = null
+        }
       }
-      showToast(t('alert.passkeyDecryptSuccess', { path: data.restoredPath }), 'success')
-    } else {
-      showToast(translateError(data.errorCode, data.errorDetail, t('alert.passkeyDecryptFailed', { error: data.errorMessage })))
-    }
+    })
   },
 
   decryptByRecoveryKeyResult(data) {
     decryptingUuids.value.delete(data.uuid)
-    if (data.success) {
-      removeVaultItem(data.uuid)
-      markLocalVaultMutation()
-      if (decryptItemInfo.value?.uuid === data.uuid) {
-        decryptPath.value = ''
-        decryptItemInfo.value = null
+    handleOperationResult(data, {
+      successMessage: t('alert.recoveryKeyDecryptSuccess', { path: data.restoredPath }),
+      failureFallback: t('alert.recoveryKeyDecryptFailed', { error: data.errorMessage }),
+      onSuccess: () => {
+        removeVaultItem(data.uuid)
+        markLocalVaultMutation()
+        if (decryptItemInfo.value?.uuid === data.uuid) {
+          decryptPath.value = ''
+          decryptItemInfo.value = null
+        }
       }
-      showToast(t('alert.recoveryKeyDecryptSuccess', { path: data.restoredPath }), 'success')
-    } else {
-      showToast(translateError(data.errorCode, data.errorDetail, t('alert.recoveryKeyDecryptFailed', { error: data.errorMessage })))
-    }
+    })
   },
 
   decryptBatchStarted() {
@@ -575,13 +593,11 @@ const messageHandlers = {
   },
 
   pathSizesResult(data) {
-    pathSizesResolve?.(data.items)
-    pathSizesResolve = null
+    resolvePending('pathSizesResult', data.items)
   },
 
   nestedLockCheckResult(data) {
-    nestedLockCountResolve?.(data.count)
-    nestedLockCountResolve = null
+    resolvePending('nestedLockCheckResult', data.count)
   },
 
   saveRecoveryKeyToFileResult(data) {
@@ -619,7 +635,7 @@ const messageHandlers = {
     if (data.purpose === 'decryptPath') {
       decryptPath.value = data.path
       decryptItemInfo.value = null
-      window.chrome.webview.postMessage({ type: 'inspectLockedFile', path: data.path })
+      sendMessage('inspectLockedFile', { path: data.path })
     } else if (data.purpose === 'decryptDestination') {
       const item = pendingDecryptItem.value
       const mode = pendingDecryptMode.value
@@ -635,7 +651,7 @@ const messageHandlers = {
       }
     } else if (data.purpose === 'vaultFolder') {
       isChangingVaultPath.value = true
-      window.chrome.webview.postMessage({ type: 'changeVaultPath', newPath: data.path })
+      sendMessage('changeVaultPath', { newPath: data.path })
     } else {
       // 資料夾選擇（單選）走這裡，加到清單裡而不是取代整份清單。
       if (!encryptPaths.value.includes(data.path)) {
@@ -701,7 +717,7 @@ const messageHandlers = {
     if (!confirmed) {
       return
     }
-    window.chrome.webview.postMessage({ type: 'deleteRecord', uuid: data.uuid })
+    sendMessage('deleteRecord', { uuid: data.uuid })
   },
 
   pathPickCancelled(data) {
@@ -766,14 +782,14 @@ if (isRunningInWebView2) {
 
   // 監聽器掛好之後才要一次設定值（尤其是語言），不要等到使用者自己點進「設定」頁籤才套用——
   // 不然使用者明明上次選了英文，重開 App 卻會先看到繁體中文，要點進設定頁才切回來，體驗很怪。
-  window.chrome.webview.postMessage({ type: 'getSettings' })
+  sendMessage('getSettings')
 }
 
 watch(activeTab, (tab) => {
   if (tab === 'list') {
     refreshList()
   } else if (tab === 'settings') {
-    window.chrome.webview.postMessage({ type: 'getSettings' })
+    sendMessage('getSettings')
   }
 })
 
@@ -803,63 +819,19 @@ function refreshList() {
   isLoadingList.value = true
   vaultListStale.value = false
   listLoadStartedAt = Date.now()
-  window.chrome.webview.postMessage({ type: 'listVault' })
+  sendMessage('listVault')
 }
 
-// 把清單裡帶有相同 batchId 的項目摺疊成一組，沒有 batchId 的維持獨立顯示。
-// 分組本身完全在前端做——後端只負責在每個項目上帶 batchId，分不分組、怎麼呈現都是畫面的事。
-const groupedVaultItems = computed(() => {
-  const groups = new Map()
-  const standalone = []
-
-  for (const item of vaultItems.value) {
-    if (item.batchId) {
-      if (!groups.has(item.batchId)) {
-        groups.set(item.batchId, [])
-      }
-      groups.get(item.batchId).push(item)
-    } else {
-      standalone.push(item)
-    }
-  }
-
-  const result = []
-  for (const item of standalone) {
-    result.push({ isGroup: false, item })
-  }
-  for (const [batchId, items] of groups) {
-    result.push({ isGroup: true, batchId, items })
-  }
-
-  result.sort((a, b) => {
-    const latest = (entry) => entry.isGroup
-      ? Math.max(...entry.items.map((i) => new Date(i.createdAtUtc).getTime()))
-      : new Date(entry.item.createdAtUtc).getTime()
-    return latest(b) - latest(a)
-  })
-
-  return result
-})
+// 分組/預覽文字的實際邏輯搬到 vaultListProjections.js（純函式，不碰任何 ref）——這裡留下的
+// 薄包裝只負責把目前的 vaultItems／t 接進去，模板呼叫端不需要跟著改。
+const groupedVaultItems = computed(() => groupVaultItems(vaultItems.value))
 
 function batchPreviewText(items) {
-  const names = items.map((i) => i.originalName)
-  if (names.length <= 2) {
-    return names.join('、')
-  }
-  return names.slice(0, 2).join('、') + t('batchPreview.suffix', { count: names.length })
+  return batchPreviewTextPure(items, t)
 }
 
-// 巢狀鎖定圖示的 tooltip：列出裡面實際包含哪些檔案，查不到任何名稱（例如巢狀項目後來
-// 也被刪除了）就退回通用文字，不留空白 tooltip。
 function nestedLockPreviewText(item) {
-  const names = item.nestedLockItemNames || []
-  if (names.length === 0) {
-    return t('list.nestedLockTitle')
-  }
-  const preview = names.length <= 2
-    ? names.join('、')
-    : names.slice(0, 2).join('、') + t('batchPreview.suffix', { count: names.length })
-  return t('list.nestedLockPreview', { preview })
+  return nestedLockPreviewTextPure(item, t)
 }
 
 function toggleGroupExpanded(batchId) {
@@ -878,15 +850,15 @@ function decryptGroupViaPassword(group) {
 function refreshHistory() {
   isLoadingHistory.value = true
   historyLoadStartedAt = Date.now()
-  window.chrome.webview.postMessage({ type: 'listHistory' })
+  sendMessage('listHistory')
 }
 
 function pickFile() {
-  window.chrome.webview.postMessage({ type: 'pickFile', purpose: 'encryptPath' })
+  sendMessage('pickFile', { purpose: 'encryptPath' })
 }
 
 function pickFolder() {
-  window.chrome.webview.postMessage({ type: 'pickFolder' })
+  sendMessage('pickFolder')
 }
 
 function removeEncryptPath(index) {
@@ -915,30 +887,29 @@ function handleFileDrop(event) {
 }
 
 function pickVaultFolder() {
-  window.chrome.webview.postMessage({ type: 'pickVaultFolder' })
+  sendMessage('pickVaultFolder')
 }
 
 function setLanguage(value) {
   settingsLanguage.value = value
   currentLocale.value = value
-  window.chrome.webview.postMessage({ type: 'updateSetting', key: 'language', value })
+  sendMessage('updateSetting', { key: 'language', value })
 }
 
 function setTheme(value) {
   settingsTheme.value = value
-  window.chrome.webview.postMessage({ type: 'updateSetting', key: 'theme', value })
+  sendMessage('updateSetting', { key: 'theme', value })
 }
 
 function pickLockedFile() {
-  window.chrome.webview.postMessage({ type: 'pickFile', purpose: 'decryptPath' })
+  sendMessage('pickFile', { purpose: 'decryptPath' })
 }
 
 // 「解密」頁籤：直接用 .locked 檔案目前所在的資料夾當還原位置，跟密碼路徑行為一致，不用額外問。
 function decryptTabViaPasskey() {
   if (!decryptItemInfo.value) return
   decryptingUuids.value.add(decryptItemInfo.value.uuid)
-  window.chrome.webview.postMessage({
-    type: 'decryptByPasskey',
+  sendMessage('decryptByPasskey', {
     uuid: decryptItemInfo.value.uuid,
     markerPath: decryptPath.value
   })
@@ -980,8 +951,7 @@ async function submitEncrypt() {
 
   // 多個項目時，Passkey／恢復金鑰在畫面上已經鎖住不能勾，這裡再保險一次，不管前端狀態怎樣都不送出去。
   const isBatch = encryptPaths.value.length > 1
-  window.chrome.webview.postMessage({
-    type: 'encrypt',
+  sendMessage('encrypt', {
     paths: encryptPaths.value,
     password: encryptPassword.value,
     hint: hint.value,
@@ -1001,8 +971,7 @@ function submitDecrypt() {
     return
   }
   isDecrypting.value = true
-  window.chrome.webview.postMessage({
-    type: 'decrypt',
+  sendMessage('decrypt', {
     path: decryptPath.value,
     password: decryptPassword.value
   })
@@ -1023,7 +992,7 @@ async function decryptFromList(item) {
   } else if (choice === 'custom') {
     pendingDecryptItem.value = item
     pendingDecryptMode.value = 'password'
-    window.chrome.webview.postMessage({ type: 'pickFolder', purpose: 'decryptDestination' })
+    sendMessage('pickFolder', { purpose: 'decryptDestination' })
   }
   // choice 是 null 代表點了背景或按 Esc，真正的取消，什麼都不做。
 }
@@ -1044,17 +1013,16 @@ function submitPasswordPrompt() {
 
   if (ctx.mode === 'batch') {
     decryptingBatchIds.value.add(ctx.group.batchId)
-    window.chrome.webview.postMessage({
-      type: 'decryptBatch',
+    sendMessage('decryptBatch', {
       uuids: ctx.group.items.map((i) => i.uuid),
       password
     })
   } else if (ctx.mode === 'delete') {
     pendingDeleteItem.value = ctx.item
-    window.chrome.webview.postMessage({ type: 'verifyPasswordForDelete', uuid: ctx.item.uuid, password })
+    sendMessage('verifyPasswordForDelete', { uuid: ctx.item.uuid, password })
   } else {
     decryptingUuids.value.add(ctx.item.uuid)
-    window.chrome.webview.postMessage({ type: 'decryptByUuid', uuid: ctx.item.uuid, password, destinationDir: ctx.destinationDir })
+    sendMessage('decryptByUuid', { uuid: ctx.item.uuid, password, destinationDir: ctx.destinationDir })
   }
 }
 
@@ -1078,13 +1046,13 @@ async function decryptFromListViaPasskey(item) {
   } else if (choice === 'custom') {
     pendingDecryptItem.value = item
     pendingDecryptMode.value = 'passkey'
-    window.chrome.webview.postMessage({ type: 'pickFolder', purpose: 'decryptDestination' })
+    sendMessage('pickFolder', { purpose: 'decryptDestination' })
   }
 }
 
 function startPasskeyDecrypt(item, destinationDir) {
   decryptingUuids.value.add(item.uuid)
-  window.chrome.webview.postMessage({ type: 'decryptByPasskey', uuid: item.uuid, destinationDir })
+  sendMessage('decryptByPasskey', { uuid: item.uuid, destinationDir })
 }
 
 // 清單頁用恢復金鑰解密：一樣先問還原到原始位置、還是自己選地方存，接著跳出輸入恢復金鑰的畫面。
@@ -1102,7 +1070,7 @@ async function decryptFromListViaRecoveryKey(item) {
   } else if (choice === 'custom') {
     pendingDecryptItem.value = item
     pendingDecryptMode.value = 'recoveryKey'
-    window.chrome.webview.postMessage({ type: 'pickFolder', purpose: 'decryptDestination' })
+    sendMessage('pickFolder', { purpose: 'decryptDestination' })
   }
 }
 
@@ -1119,8 +1087,7 @@ function submitRecoveryKeyDecrypt() {
     return
   }
   decryptingUuids.value.add(item.uuid)
-  window.chrome.webview.postMessage({
-    type: 'decryptByRecoveryKey',
+  sendMessage('decryptByRecoveryKey', {
     uuid: item.uuid,
     recoveryKey: recoveryKeyInputValue.value.trim(),
     destinationDir: recoveryKeyPromptDestination.value,
@@ -1161,8 +1128,7 @@ async function copyRecoveryKey() {
 }
 
 function saveRecoveryKeyToFile() {
-  window.chrome.webview.postMessage({
-    type: 'saveRecoveryKeyToFile',
+  sendMessage('saveRecoveryKeyToFile', {
     content: t('recoveryKeyModal.fileContent', { key: recoveryKeyDisplay.value }),
     suggestedFileName: t('recoveryKeyModal.suggestedFileName')
   })

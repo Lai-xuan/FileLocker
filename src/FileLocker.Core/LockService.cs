@@ -393,10 +393,9 @@ public class LockService
 
     private UnlockResult DecryptByUuidCore(string uuid, string password, string? destinationDir)
     {
-        var metadata = _vault.LoadMetadata(uuid);
-        if (metadata is null)
+        if (!TryLoadMetadata(uuid, out var metadata, out var notFoundResult))
         {
-            return new UnlockResult(false, "", "找不到對應的加密紀錄", ErrorCode: ErrorCodes.RecordNotFound);
+            return notFoundResult!;
         }
 
         var destinationParentDir = ResolveDestinationParentDir(metadata, destinationDir, out var resolveError);
@@ -421,10 +420,9 @@ public class LockService
     /// </summary>
     public async Task<UnlockResult> DecryptByPasskeyAsync(string uuid, IntPtr ownerWindowHandle, string? destinationDir = null)
     {
-        var metadata = _vault.LoadMetadata(uuid);
-        if (metadata is null)
+        if (!TryLoadMetadata(uuid, out var metadata, out var notFoundResult))
         {
-            return new UnlockResult(false, "", "找不到對應的加密紀錄", ErrorCode: ErrorCodes.RecordNotFound);
+            return notFoundResult!;
         }
 
         if (!metadata.PasskeyEnabled || metadata.PasskeyCredentialName is null
@@ -462,21 +460,10 @@ public class LockService
             CryptographicOperations.ZeroMemory(signature);
         }
 
-        var destinationParentDir = ResolveDestinationParentDir(metadata, destinationDir, out var resolveError);
-        if (destinationParentDir is null)
-        {
-            CryptographicOperations.ZeroMemory(contentKey);
-            return new UnlockResult(false, "", resolveError!, ErrorCode: ErrorCodes.ResolveDestinationError, ErrorDetail: resolveError);
-        }
-
-        var result = await Task.Run(() => RestoreFromKey(metadata, contentKey, destinationParentDir, "passkey"));
-
-        if (result.Success)
-        {
-            CleanupMarkerIfMatches(metadata, uuid);
-        }
-
-        return result;
+        // 這裡連同 ResolveDestinationParentDir（含 Directory.CreateDirectory）一起丟進背景執行緒，
+        // 不只是原本的 RestoreFromKey——跟這個方法一開始特意把 Passkey 簽章步驟留在呼叫端執行緒
+        // 的理由相反，這一段純粹是檔案 I/O，沒有 WinRT 呼叫，搬進背景執行緒沒有風險。
+        return await Task.Run(() => FinishAfterKeyResolved(metadata, uuid, contentKey, destinationDir, "passkey"));
     }
 
     /// <summary>對應「恢復金鑰」備援路徑：不需要密碼、不需要 Windows Hello，用使用者自己抄下來的恢復金鑰解鎖。</summary>
@@ -485,10 +472,9 @@ public class LockService
 
     private UnlockResult DecryptByRecoveryKeyCore(string uuid, string recoveryKeyInput, string? destinationDir)
     {
-        var metadata = _vault.LoadMetadata(uuid);
-        if (metadata is null)
+        if (!TryLoadMetadata(uuid, out var metadata, out var notFoundResult))
         {
-            return new UnlockResult(false, "", "找不到對應的加密紀錄", ErrorCode: ErrorCodes.RecordNotFound);
+            return notFoundResult!;
         }
 
         if (!metadata.RecoveryKeyEnabled || metadata.RecoveryKeyWrappedContentKey is null)
@@ -524,6 +510,19 @@ public class LockService
             CryptographicOperations.ZeroMemory(recoveryKeyBytes);
         }
 
+        return FinishAfterKeyResolved(metadata, uuid, contentKey, destinationDir, "recoveryKey");
+    }
+
+    /// <summary>
+    /// DecryptByPasskeyAsync／DecryptByRecoveryKeyCore 共用：兩者都是「先透過各自的方式解出
+    /// contentKey，再解目的地資料夾、還原、清掉舊標記檔」，差別只有 unlockMethod 字串跟外層
+    /// 是否要包一層 Task.Run。DecryptByUuidCore 不套用這個方法——它是直接拿密碼交給
+    /// DecryptAndRestore 內部同時做「驗證＋衍生金鑰＋還原」，呼叫這一層時根本沒有一個已經
+    /// 解開的 contentKey 可以傳進來，硬套會讓這個方法多長出一個處理「沒有 key」的分支，
+    /// 介面被迫變複雜，不划算——維持 DecryptByUuidCore 自己的序列不變。
+    /// </summary>
+    private UnlockResult FinishAfterKeyResolved(LockedItemMetadata metadata, string uuid, byte[] contentKey, string? destinationDir, string unlockMethod)
+    {
         var destinationParentDir = ResolveDestinationParentDir(metadata, destinationDir, out var resolveError);
         if (destinationParentDir is null)
         {
@@ -531,7 +530,7 @@ public class LockService
             return new UnlockResult(false, "", resolveError!, ErrorCode: ErrorCodes.ResolveDestinationError, ErrorDetail: resolveError);
         }
 
-        var result = RestoreFromKey(metadata, contentKey, destinationParentDir, "recoveryKey");
+        var result = RestoreFromKey(metadata, contentKey, destinationParentDir, unlockMethod);
 
         if (result.Success)
         {
@@ -539,6 +538,22 @@ public class LockService
         }
 
         return result;
+    }
+
+    /// <summary>找不到 metadata 時，三個 Decrypt*Core／Async 入口共用的「找不到對應加密紀錄」結果。</summary>
+    private bool TryLoadMetadata(string uuid, out LockedItemMetadata metadata, out UnlockResult? notFoundResult)
+    {
+        var loaded = _vault.LoadMetadata(uuid);
+        if (loaded is null)
+        {
+            metadata = null!;
+            notFoundResult = new UnlockResult(false, "", "找不到對應的加密紀錄", ErrorCode: ErrorCodes.RecordNotFound);
+            return false;
+        }
+
+        metadata = loaded;
+        notFoundResult = null;
+        return true;
     }
 
     /// <summary>DecryptByUuidCore／DecryptByPasskeyAsync 共用：算出解密後要還原到哪個資料夾。</summary>
@@ -599,30 +614,13 @@ public class LockService
     /// <summary>密碼路徑：驗證密碼、拿到內容金鑰後，交給 RestoreFromKey 做剩下的還原工作。</summary>
     private UnlockResult DecryptAndRestore(LockedItemMetadata metadata, string password, string destinationParentDir)
     {
-        if (_lockout is not null)
+        var verification = VerifyPasswordAndDeriveKey(metadata, password);
+        if (!verification.Success)
         {
-            var lockoutStatus = _lockout.CheckStatus(metadata.Uuid);
-            if (lockoutStatus.IsLockedOut)
-            {
-                return new UnlockResult(false, "", $"密碼錯誤次數過多，請在 {FormatRemaining(lockoutStatus.RemainingLockout!.Value)}後再試", ErrorCode: ErrorCodes.LockedOut, ErrorDetail: ((int)lockoutStatus.RemainingLockout!.Value.TotalSeconds).ToString());
-            }
+            return new UnlockResult(false, "", verification.ErrorMessage!, ErrorCode: verification.ErrorCode, ErrorDetail: verification.ErrorDetail);
         }
 
-        var salt = Convert.FromBase64String(metadata.Salt);
-        var storedHash = Convert.FromBase64String(metadata.PasswordVerificationHash);
-
-        var (isValid, encryptionKey) = Argon2KeyDerivation.VerifyPassword(
-            password, salt, storedHash,
-            metadata.Argon2TimeCost, metadata.Argon2MemoryCostKb, metadata.Argon2Parallelism);
-
-        if (!isValid || encryptionKey is null)
-        {
-            _lockout?.RecordFailedAttempt(metadata.Uuid);
-            return new UnlockResult(false, "", "密碼錯誤", ErrorCode: ErrorCodes.PasswordIncorrect);
-        }
-
-        _lockout?.RecordSuccess(metadata.Uuid);
-        return RestoreFromKey(metadata, encryptionKey, destinationParentDir, "password");
+        return RestoreFromKey(metadata, verification.EncryptionKey!, destinationParentDir, "password");
     }
 
     /// <summary>
@@ -645,12 +643,32 @@ public class LockService
             return new VerifyPasswordResult(true);
         }
 
+        var verification = VerifyPasswordAndDeriveKey(metadata, password);
+        if (verification.EncryptionKey is not null)
+        {
+            // 這條路徑不需要內容金鑰本身（只是要證明「這個人真的知道密碼」），驗證完就清掉，
+            // 不像 DecryptAndRestore 那樣把金鑰交給 RestoreFromKey 繼續用。
+            CryptographicOperations.ZeroMemory(verification.EncryptionKey);
+        }
+
+        return verification.Success
+            ? new VerifyPasswordResult(true)
+            : new VerifyPasswordResult(false, verification.ErrorMessage, ErrorCode: verification.ErrorCode, ErrorDetail: verification.ErrorDetail);
+    }
+
+    /// <summary>DecryptAndRestore／VerifyPasswordCore 共用：檢查鎖定狀態、驗證密碼、衍生內容金鑰，並記錄成功/失敗次數。</summary>
+    private readonly record struct PasswordVerification(bool Success, byte[]? EncryptionKey, string? ErrorCode, string? ErrorDetail, string? ErrorMessage);
+
+    private PasswordVerification VerifyPasswordAndDeriveKey(LockedItemMetadata metadata, string password)
+    {
         if (_lockout is not null)
         {
             var lockoutStatus = _lockout.CheckStatus(metadata.Uuid);
             if (lockoutStatus.IsLockedOut)
             {
-                return new VerifyPasswordResult(false, $"密碼錯誤次數過多，請在 {FormatRemaining(lockoutStatus.RemainingLockout!.Value)}後再試", ErrorCode: ErrorCodes.LockedOut, ErrorDetail: ((int)lockoutStatus.RemainingLockout!.Value.TotalSeconds).ToString());
+                return new PasswordVerification(false, null, ErrorCodes.LockedOut,
+                    ((int)lockoutStatus.RemainingLockout!.Value.TotalSeconds).ToString(),
+                    $"密碼錯誤次數過多，請在 {FormatRemaining(lockoutStatus.RemainingLockout!.Value)}後再試");
             }
         }
 
@@ -661,19 +679,14 @@ public class LockService
             password, salt, storedHash,
             metadata.Argon2TimeCost, metadata.Argon2MemoryCostKb, metadata.Argon2Parallelism);
 
-        if (encryptionKey is not null)
-        {
-            CryptographicOperations.ZeroMemory(encryptionKey);
-        }
-
-        if (!isValid)
+        if (!isValid || encryptionKey is null)
         {
             _lockout?.RecordFailedAttempt(metadata.Uuid);
-            return new VerifyPasswordResult(false, "密碼錯誤", ErrorCode: ErrorCodes.PasswordIncorrect);
+            return new PasswordVerification(false, null, ErrorCodes.PasswordIncorrect, null, "密碼錯誤");
         }
 
         _lockout?.RecordSuccess(metadata.Uuid);
-        return new VerifyPasswordResult(true);
+        return new PasswordVerification(true, encryptionKey, null, null, null);
     }
 
     private static string FormatRemaining(TimeSpan remaining)
