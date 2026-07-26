@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FileLocker.Core.FolderPackaging;
 using FileLocker.Core.History;
 using FileLocker.Core.Models;
 using FileLocker.Core.Settings;
@@ -158,6 +159,16 @@ public sealed class VaultProtocolHandlers
         return new PathSizeInfo(0, false);
     }
 
+    /// <summary>
+    /// 加密前的巢狀鎖定掃描——純粹讓前端知道「這批選取項目裡有沒有巢狀 .locked 檔案」，
+    /// 好顯示一個資訊性提示（不阻擋加密，巢狀項目本身的 vault 紀錄不受外層加密/刪除影響，
+    /// 見 LockService.DecryptByUuidCore 不依賴指標檔就能解密）。純掃描，不寫入任何東西。
+    /// </summary>
+    public async Task<int> CheckNestedLockCountAsync(IReadOnlyList<string> paths)
+        => await Task.Run(() => paths
+            .Where(Directory.Exists)
+            .Sum(path => FolderArchiver.FindNestedLockedFiles(path).Count));
+
     public SettingsResponse GetSettings() => new(_settings.VaultPath, _settings.Language, _settings.Theme);
 
     public UpdateSettingResponse UpdateSetting(string key, string value)
@@ -268,12 +279,59 @@ public sealed class VaultProtocolHandlers
                 }
             }
 
+            // 巢狀 uuid → 包住它的外層項目名稱對照表。資料夾加密時，內層既有的 .locked 指標檔
+            // 會整包被壓縮進外層的 zip，內層原始位置的資料夾本身也會被刪除——所以內層項目的
+            // 指標檔「找不到」不一定是使用者自己搬移/刪除，很常見是被外層資料夾加密整個收進去了。
+            // 只掃有巢狀鎖定的候選項目（通常很少），一次建好對照表，避免底下每一筆缺指標檔的
+            // 項目都要重新掃一次全部候選、重複讀取同一份外層 metadata。
+            // 同一個迴圈順便建一份反過來的對照表：外層 uuid → 巢狀項目名稱清單，給清單頁的
+            // 🔒 ×N 圖示 tooltip 用（顯示裡面實際包含哪些檔案，不是只顯示數量）。複用同一次
+            // LoadMetadata(candidate.Uuid) 呼叫，不需要為了這件事再重新讀一次檔。
+            var nestedContainerNames = new Dictionary<string, string>();
+            var containerNestedNames = new Dictionary<string, List<string>>();
+            foreach (var candidate in validEntries.Where(e => e.NestedLockCount > 0))
+            {
+                var containerMetadata = _vaultManager.LoadMetadata(candidate.Uuid);
+                if (containerMetadata is null)
+                {
+                    continue;
+                }
+
+                var nestedNames = new List<string>();
+                foreach (var nestedUuid in containerMetadata.ContainsNestedLocks)
+                {
+                    nestedContainerNames[nestedUuid] = containerMetadata.OriginalName;
+
+                    // 查不到名稱（該巢狀項目後來也被刪除了）就跳過，不硬塞一個佔位字串進清單。
+                    var nestedName = _vaultManager.LoadMetadata(nestedUuid)?.OriginalName;
+                    if (nestedName is not null)
+                    {
+                        nestedNames.Add(nestedName);
+                    }
+                }
+                containerNestedNames[candidate.Uuid] = nestedNames;
+            }
+
             return validEntries
                 .AsParallel()
                 .Select(entry =>
                 {
                     var markerStatus = MarkerStatusChecker.CheckMarkerStatus(entry.Uuid, entry.OriginalPath, entry.Type);
-                    return new VaultListItemResponse(entry, markerStatus);
+                    if (!markerStatus.Found && markerStatus.ConflictingUuid is { } conflictingUuid)
+                    {
+                        // 查得到佔用者的名稱就直接講清楚是誰取代的，查不到（例如那個項目後來也被
+                        // 刪除了）就維持原本的通用訊息——這條路徑本來就很罕見，不需要第二層 fallback 文案。
+                        var conflictingName = _vaultManager.LoadMetadata(conflictingUuid)?.OriginalName;
+                        if (conflictingName is not null)
+                        {
+                            markerStatus = markerStatus with { Message = $"指標檔已被「{conflictingName}」鎖定" };
+                        }
+                    }
+                    else if (!markerStatus.Found && nestedContainerNames.TryGetValue(entry.Uuid, out var containerName))
+                    {
+                        markerStatus = markerStatus with { Message = $"該檔案的指標檔已經收進「{containerName}」這個資料夾一起加密了" };
+                    }
+                    return new VaultListItemResponse(entry, markerStatus, containerNestedNames.GetValueOrDefault(entry.Uuid, []));
                 })
                 .ToList()
                 .OrderByDescending(item => item.CreatedAtUtc)

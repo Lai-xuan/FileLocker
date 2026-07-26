@@ -16,6 +16,10 @@ import lightModeBlackUrl from './assets/Light_Mode_Black.svg'
 import lightModeWhiteUrl from './assets/Light_Mode_White.svg'
 import darkModeBlackUrl from './assets/Dark_Mode_Black.svg'
 import darkModeWhiteUrl from './assets/Dark_Mode_White.svg'
+import lockLightUrl from './assets/Lock_Light.svg'
+import lockDarkUrl from './assets/Lock_Dark.svg'
+import warningLightUrl from './assets/Warning_Light.svg'
+import warningDarkUrl from './assets/Warning_Dark.svg'
 
 // ---- 多語言：目前支援繁體中文／英文，語言包放在 locales/ 底下的 JSON 檔。
 // t() 找不到對應的語言檔或找不到 key 時，會退回繁體中文，再找不到就直接顯示 key 本身
@@ -211,6 +215,8 @@ const lightModeIconUrl = computed(() => settingsTheme.value === 'dark' ? lightMo
 const darkModeIconUrl = computed(() => settingsTheme.value === 'dark' ? darkModeWhiteUrl : darkModeBlackUrl)
 const passkeyIconUrl = computed(() => settingsTheme.value === 'dark' ? passkeyWhiteUrl : passkeyBlackUrl)
 const recoveryKeyIconUrl = computed(() => settingsTheme.value === 'dark' ? recoveryKeyWhiteUrl : recoveryKeyBlackUrl)
+const nestedLockIconUrl = computed(() => settingsTheme.value === 'dark' ? lockDarkUrl : lockLightUrl)
+const warningIconUrl = computed(() => settingsTheme.value === 'dark' ? warningDarkUrl : warningLightUrl)
 const settingsSaveMessage = ref('')
 const isChangingVaultPath = ref(false)
 
@@ -252,6 +258,16 @@ function requestPathSizes(paths) {
   return new Promise((resolve) => {
     pathSizesResolve = resolve
     window.chrome.webview.postMessage({ type: 'getPathSizes', paths })
+  })
+}
+
+// 加密前掃描選取項目裡有沒有巢狀 .locked 檔案——純資訊性用途，數量只拿來顯示一個不擋
+// 流程的提示（見 submitEncrypt），不是像 pathSizesResolve 那樣影響進度條估算。
+let nestedLockCountResolve = null
+function requestNestedLockCount(paths) {
+  return new Promise((resolve) => {
+    nestedLockCountResolve = resolve
+    window.chrome.webview.postMessage({ type: 'checkNestedLocks', paths })
   })
 }
 
@@ -561,6 +577,11 @@ const messageHandlers = {
     pathSizesResolve = null
   },
 
+  nestedLockCheckResult(data) {
+    nestedLockCountResolve?.(data.count)
+    nestedLockCountResolve = null
+  },
+
   saveRecoveryKeyToFileResult(data) {
     if (data.success) {
       recoveryKeySaveState.value = 'saved'
@@ -826,6 +847,19 @@ function batchPreviewText(items) {
   return names.slice(0, 2).join('、') + t('batchPreview.suffix', { count: names.length })
 }
 
+// 巢狀鎖定圖示的 tooltip：列出裡面實際包含哪些檔案，查不到任何名稱（例如巢狀項目後來
+// 也被刪除了）就退回通用文字，不留空白 tooltip。
+function nestedLockPreviewText(item) {
+  const names = item.nestedLockItemNames || []
+  if (names.length === 0) {
+    return t('list.nestedLockTitle')
+  }
+  const preview = names.length <= 2
+    ? names.join('、')
+    : names.slice(0, 2).join('、') + t('batchPreview.suffix', { count: names.length })
+  return t('list.nestedLockPreview', { preview })
+}
+
 function toggleGroupExpanded(batchId) {
   if (expandedGroups.value.has(batchId)) {
     expandedGroups.value.delete(batchId)
@@ -931,6 +965,11 @@ async function submitEncrypt() {
     encryptItemResults.value = [{ path: '', success: false, errorMessage: t('encrypt.passwordMismatch'), note: '' }]
     return
   }
+  const nestedLockCount = await requestNestedLockCount(encryptPaths.value)
+  if (nestedLockCount > 0) {
+    showToast(t('alert.nestedLockNotice', { count: nestedLockCount }), 'info')
+  }
+
   isEncrypting.value = true
   encryptItemResults.value = []
 
@@ -1427,7 +1466,7 @@ function historyDetailText(entry) {
             <input v-model="decryptPassword" type="password" class="text-input" />
           </div>
 
-          <button class="button button--primary" @click="submitDecrypt" :disabled="isDecrypting">
+          <button class="button button--primary" @click="submitDecrypt" :disabled="isDecrypting || !decryptPath || !decryptPassword">
             {{ isDecrypting ? t('decrypt.decrypting') : t('decrypt.submit') }}
           </button>
 
@@ -1528,12 +1567,12 @@ function historyDetailText(entry) {
                       </td>
                       <td>
                         <div class="cell-name" :title="group.item.originalName">{{ group.item.originalName }}</div>
-                        <span v-if="group.item.hasNestedLocks" class="badge" :title="t('list.nestedLockTitle')">🔒 ×{{ group.item.nestedLockCount }}</span>
-                        <div v-if="!group.item.markerFound" class="status-warning">{{ t('list.markerMissing', { message: group.item.markerStatusMessage }) }}</div>
+                        <span v-if="group.item.hasNestedLocks" class="badge badge--nested-lock" :title="nestedLockPreviewText(group.item)"><img :src="nestedLockIconUrl" alt="" class="badge__icon" />×{{ group.item.nestedLockCount }}</span>
+                        <div v-if="!group.item.markerFound" class="status-warning"><img :src="warningIconUrl" alt="" class="status-warning__icon" />{{ t('list.markerMissing', { message: group.item.markerStatusMessage }) }}</div>
                       </td>
                       <td>{{ typeLabel(group.item.type) }}</td>
                       <td>{{ formatSize(group.item.originalSizeBytes) }}</td>
-                      <td>{{ group.item.hint || t('list.hintNone') }}</td>
+                      <td><div class="cell-hint" :title="group.item.hint || ''">{{ group.item.hint || t('list.hintNone') }}</div></td>
                       <td>{{ formatDate(group.item.createdAtUtc) }}</td>
                       <td>
                         <div class="table__actions">
@@ -1593,12 +1632,12 @@ function historyDetailText(entry) {
                           </td>
                           <td>
                             <div class="cell-name" :title="item.originalName">{{ item.originalName }}</div>
-                            <span v-if="item.hasNestedLocks" class="badge" :title="t('list.nestedLockTitle')">🔒 ×{{ item.nestedLockCount }}</span>
-                            <div v-if="!item.markerFound" class="status-warning">{{ t('list.markerMissing', { message: item.markerStatusMessage }) }}</div>
+                            <span v-if="item.hasNestedLocks" class="badge badge--nested-lock" :title="nestedLockPreviewText(item)"><img :src="nestedLockIconUrl" alt="" class="badge__icon" />×{{ item.nestedLockCount }}</span>
+                            <div v-if="!item.markerFound" class="status-warning"><img :src="warningIconUrl" alt="" class="status-warning__icon" />{{ t('list.markerMissing', { message: item.markerStatusMessage }) }}</div>
                           </td>
                           <td>{{ typeLabel(item.type) }}</td>
                           <td>{{ formatSize(item.originalSizeBytes) }}</td>
-                          <td>{{ item.hint || t('list.hintNone') }}</td>
+                          <td><div class="cell-hint" :title="item.hint || ''">{{ item.hint || t('list.hintNone') }}</div></td>
                           <td>{{ formatDate(item.createdAtUtc) }}</td>
                           <td>
                             <div class="table__actions">
@@ -2941,6 +2980,7 @@ textarea.text-input {
   padding: 0.7rem 0.85rem;
   border-bottom: 1px solid var(--color-border);
   vertical-align: top;
+  white-space: nowrap;
 }
 
 .table tbody tr:last-child td {
@@ -3071,6 +3111,14 @@ textarea.text-input {
   cursor: default;
 }
 
+.cell-hint {
+  max-width: 160px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+
 .badge {
   display: inline-block;
   font-size: 0.75rem;
@@ -3078,10 +3126,32 @@ textarea.text-input {
   margin-top: 0.15rem;
 }
 
+.badge--nested-lock {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.badge__icon {
+  width: 0.85rem;
+  height: 0.85rem;
+  position: relative;
+  top: -1px;
+}
+
 .status-warning {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
   font-size: 0.78rem;
   color: var(--color-danger);
   margin-top: 0.2rem;
+}
+
+.status-warning__icon {
+  width: 0.85rem;
+  height: 0.85rem;
+  flex-shrink: 0;
 }
 
 .group-row td {
@@ -3199,6 +3269,14 @@ textarea.text-input {
 
 .toast--success .toast__icon {
   color: var(--color-success);
+}
+
+.toast--info {
+  border-left-color: var(--color-accent);
+}
+
+.toast--info .toast__icon {
+  color: var(--color-accent);
 }
 
 .toast-enter-from,

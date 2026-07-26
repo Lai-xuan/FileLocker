@@ -536,6 +536,10 @@ public partial class MainWindow : Window
                     await HandleGetPathSizesRequestAsync(root);
                     break;
 
+                case "checkNestedLocks":
+                    await HandleCheckNestedLocksRequestAsync(root);
+                    break;
+
                 case "saveRecoveryKeyToFile":
                     HandleSaveRecoveryKeyToFileRequest(root);
                     break;
@@ -878,6 +882,21 @@ public partial class MainWindow : Window
         var items = await _protocolHandlers.GetPathSizesAsync(paths);
 
         SendToFrontend(new { type = "pathSizesResult", items });
+    }
+
+    /// <summary>
+    /// 加密前的巢狀鎖定掃描——純資訊性用途，前端拿到數量後只會顯示一個不擋流程的提示，
+    /// 不是像 getPathSizes 那樣影響進度條估算，也不需要因為抓不到資料而特別處理錯誤情境。
+    /// </summary>
+    private async Task HandleCheckNestedLocksRequestAsync(JsonElement request)
+    {
+        var paths = request.GetProperty("paths").EnumerateArray()
+            .Select(p => p.GetString() ?? "")
+            .ToList();
+
+        var count = await _protocolHandlers.CheckNestedLockCountAsync(paths);
+
+        SendToFrontend(new { type = "nestedLockCheckResult", count });
     }
 
     private void HandleGetSettingsRequest()

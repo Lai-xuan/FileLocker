@@ -2,6 +2,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
@@ -85,10 +86,23 @@ public partial class PasswordPromptWindow : Window
             Grid.SetColumnSpan(RecoveryKeyButton, 2);
         }
 
+        // UnlockButton 一開始是空白輸入、IsEnabled="False"（XAML 預設值），這裡把游標狀態
+        // 對齊起來，不用等使用者輸入第一個字才修正。
+        UnlockButtonHost.Cursor = Cursors.No;
+
         Loaded += async (_, _) =>
         {
             if (_passkeyEnabled)
             {
+                // 不要一 Loaded 就馬上觸發——這個時間點只代表版面配置跑完，不保證這個剛建立的
+                // 視窗這時候已經真的拿到 OS 層級穩定的前景/作用中狀態（尤其這個視窗常常是背景的
+                // Named Pipe 監聽執行緒透過 Dispatcher.Invoke 建立顯示的，不是使用者直接點擊
+                // 觸發的全新行程啟動）。如果這裡還沒穩定就搶著把前景讓給 Windows Hello，緊接著
+                // WPF/OS 對這個視窗自己的 pending 作用中程序完成時，反而會把焦點搶回來、蓋掉
+                // 剛顯示的驗證視窗。先明確 Activate 一次、讓出一輪 Dispatcher，確保自己的作用中
+                // 狀態已經穩定、佇列裡排隊的視窗訊息都處理完，才開始觸發 Passkey。
+                Activate();
+                await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.Input);
                 await TryPasskeyUnlockAsync();
             }
             else
@@ -156,6 +170,7 @@ public partial class PasswordPromptWindow : Window
 
         ErrorText.Visibility = Visibility.Collapsed;
         RecoveryKeyInput.Focus();
+        UpdateUnlockButtonEnabled();
     }
 
     /// <summary>
@@ -177,6 +192,7 @@ public partial class PasswordPromptWindow : Window
 
         ErrorText.Visibility = Visibility.Collapsed;
         PasswordInput.Focus();
+        UpdateUnlockButtonEnabled();
     }
 
     private async void UnlockButton_Click(object sender, RoutedEventArgs e)
@@ -289,11 +305,36 @@ public partial class PasswordPromptWindow : Window
     {
         PasswordInput.IsEnabled = !isBusy;
         RecoveryKeyInput.IsEnabled = !isBusy;
-        UnlockButton.IsEnabled = !isBusy;
+        UnlockButton.IsEnabled = !isBusy && HasActiveInputText();
+        UnlockButtonHost.Cursor = UnlockButton.IsEnabled ? Cursors.Hand : Cursors.No;
         CancelButton.IsEnabled = !isBusy;
         PasskeyButton.IsEnabled = !isBusy;
         RecoveryKeyButton.IsEnabled = !isBusy;
     }
+
+    /// <summary>
+    /// 沒輸入密碼／恢復金鑰時「解密」按鈕維持不能按的狀態——按下去必然失敗（密碼錯誤／
+    /// 恢復金鑰格式不對），與其讓使用者按了才看到錯誤訊息，不如直接不給按。
+    /// </summary>
+    private bool HasActiveInputText()
+        => _mode == UnlockInputMode.RecoveryKey
+            ? !string.IsNullOrEmpty(RecoveryKeyInput.Text)
+            : !string.IsNullOrEmpty(PasswordInput.Password);
+
+    private void UpdateUnlockButtonEnabled()
+    {
+        if (_isBusy)
+        {
+            return;
+        }
+
+        UnlockButton.IsEnabled = HasActiveInputText();
+        UnlockButtonHost.Cursor = UnlockButton.IsEnabled ? Cursors.Hand : Cursors.No;
+    }
+
+    private void PasswordInput_PasswordChanged(object sender, RoutedEventArgs e) => UpdateUnlockButtonEnabled();
+
+    private void RecoveryKeyInput_TextChanged(object sender, TextChangedEventArgs e) => UpdateUnlockButtonEnabled();
 
     private void CancelButton_Click(object sender, RoutedEventArgs e) => Close();
 
@@ -303,9 +344,9 @@ public partial class PasswordPromptWindow : Window
     /// 這種情境用的標準做法。左上角的關閉圓形按鈕是獨立的 Button，點擊事件會被它自己吃掉、
     /// 不會冒泡到這裡，兩者不會互相干擾。
     /// </summary>
-    private void TitleBar_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        if (e.ButtonState == System.Windows.Input.MouseButtonState.Pressed)
+        if (e.ButtonState == MouseButtonState.Pressed)
         {
             DragMove();
         }

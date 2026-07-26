@@ -238,7 +238,7 @@ HKEY_CLASSES_ROOT\FileLocker.LockedFile\shell\open\command
 - WebView2 填滿整個視窗時，會把邊緣縮放需要的滑鼠事件整個截走（WebView2 內部是獨立的原生子視窗，不是純 WPF 畫面，這是微軟官方已確認、追蹤中的已知 bug，見 MicrosoftEdge/WebView2Feedback#4538）。解法：`Margin="6"` 給 WebView2 控制項留一圈真正的 WPF 空間，縮放偵測才抓得到，代價是視窗邊緣有一條窄窄的實色邊。這條窄邊的顏色會跟著深色模式同步變化（`ApplyWindowBackgroundForTheme`）。
 - 無邊框視窗預設會連 Windows 11 原生的圓角、投影都拿掉：`DwmSetWindowAttribute`（`DWMWA_WINDOW_CORNER_PREFERENCE`）手動要回圓角。
 - 攔截 `WM_GETMINMAXINFO` 修正最大化超出工作區邊界（會跟工作列、或使用者自己裝的第三方 Dock 工具重疊）的同時，**一定要自己把 `Window.MinWidth`／`MinHeight` 換算回 `MinTrackSize`**——攔截這個訊息會讓 WPF 內建的最小尺寸限制邏輯整個不執行，漏掉這步視窗會沒有下限，可以被拖到比視窗控制按鈕還小。
-- **最大化/還原動畫**：早期版本用 `WindowStyle="None"` + `WindowChrome` 做無邊框視窗，代價是連 Win32 層級的 `WS_CAPTION`／`WS_THICKFRAME` 樣式都被拿掉，DWM 因此不把這個視窗當一般可動畫視窗看待，完全沒有原生的長大/縮小過場效果。改成保留 `WindowStyle="SingleBorderWindow"`（原生樣式技術上存在），自己在 `WndProc` 攔截 `WM_NCCALCSIZE` 把非客戶區（標題列/邊框）視覺上收縮到 0（有樣式、但畫面上完全看不到），再攔截 `WM_NCHITTEST` 自己判斷滑鼠落在哪個縮放邊界（不搶 `HTCAPTION`，那個仍交給 WebView2 的 `IsNonClientRegionSupportEnabled` 處理，避免兩邊都想處理同一件事）——這是 VS Code／Windows Terminal／Chromium 在 Win32 上做無邊框視窗的標準手法，讓 DWM 原生動畫回來，同時保留視覺上完全無邊框的效果。
+- **最大化/還原動畫**：早期版本用 `WindowStyle="None"` + `WindowChrome` 做無邊框視窗，代價是連 Win32 層級的 `WS_CAPTION`／`WS_THICKFRAME` 樣式都被拿掉，DWM 因此不把這個視窗當一般可動畫視窗看待，完全沒有原生的長大/縮小過場效果。改成保留 `WindowStyle="SingleBorderWindow"`（原生樣式技術上存在），自己在 `WndProc` 攔截 `WM_NCCALCSIZE` 把非客戶區（標題列/邊框）視覺上收縮到 0（有樣式、但畫面上完全看不到），再攔截 `WM_NCHITTEST` 自己判斷滑鼠落在哪個縮放邊界（不搶 `HTCAPTION`，那個仍交給 WebView2 的 `IsNonClientRegionSupportEnabled` 處理，避免兩邊都想處理同一件事）——這是 VS Code／Windows Terminal／Chromium 在 Win32 上做無邊框視窗的標準手法，讓 DWM 原生動畫回來，同時保留視覺上完全無邊框的效果。已實機測試確認動畫、拖曳、縮放邊框、Aero Snap 皆正常運作。
 
 **拖放檔案支援**：不透過 WPF 層級的原生拖放（WebView2 的原生子視窗會把整個拖放操作攔死，連游標都會顯示禁止符號，是同一種 airspace 問題）。改用 WebView2 官方專門為此設計的管道：JS 端正常接住 HTML5 `drop` 事件（這步在 WebView2 內部本來就正常運作），用 `chrome.webview.postMessageWithAdditionalObjects` 把 `File` 物件連同訊息一起送到 C# 端，C# 收到的是 `CoreWebView2File`，讀 `.Path` 屬性拿到真正磁碟路徑——這是 WebView2 特有的機制，一般網頁的 `File` 物件永遠拿不到真正路徑（瀏覽器故意的安全限制），WebView2 是給原生桌面 App 用的才特別開了這個口子。拖放進來的路徑合併進加密頁籤現有的清單（去重複），不是整份取代。
 
@@ -332,7 +332,7 @@ App 圖示（工作列/Alt+Tab 顯示）跟 `.locked` 副檔名圖示已設計�
 |---|---|---|
 | Core Engine | 檔案/資料夾加密解密邏輯、UUID 機制、Argon2+AES-GCM、Zip 封裝、單元測試 | 完成 |
 | Metadata 層 | `.meta.json` 讀寫、SQLite 本機快取索引、`FileSystemWatcher` 即時監控 | 完成 |
-| CLI 原型 | 驗證單檔/資料夾加解密與 Vault 掃描邏輯 | 未開始 |
+| CLI 原型 | `--encrypt`／`--unlock`／`--unlock-recovery`／`--list`／`--delete`，支援 `FILELOCKER_VAULT_PATH` 環境變數與管線輸入 | 基本功能完成（無 GUI 可操作 Vault），尚未涵蓋 Passkey、批次操作 |
 | WebView2 + Vue 3 前端 | 主頁籤、清單頁、密碼視窗、Vault 設定精靈、GUI 視覺美化（無邊框視窗、設計系統、深色模式、拖放檔案、進度條、動效細節） | 完成 |
 | Shell Extension（C++ 最小化元件） | 右鍵選單、多選批次支援、HKCU 自動註冊 | 完成 |
 | `.locked` 副檔名關聯 | 註冊腳本 | 待安裝程式階段一併處理 |
@@ -345,9 +345,8 @@ App 圖示（工作列/Alt+Tab 顯示）跟 `.locked` 副檔名圖示已設計�
 
 ## 14. 已知限制與待辦事項（非缺陷，是刻意取捨或尚未進行的工作）
 
-- CLI 完整功能尚未開始。
+- CLI 已有基本功能（`--encrypt`／`--unlock`／`--unlock-recovery`／`--list`／`--delete`），尚未涵蓋 Passkey、批次操作。
 - 密碼小視窗（`PasswordPromptWindow`）已改成無邊框並對齊主視窗設計系統，字體例外用 Segoe UI（IBM Plex Sans 目前沒有可嵌入的 ttf/otf 檔）。
-- 主視窗最大化/還原動畫改成 `WindowStyle="SingleBorderWindow"` + 自行處理 `WM_NCCALCSIZE`／`WM_NCHITTEST`（見 9.1 節），已實機測試確認動畫、拖曳、縮放邊框、Aero Snap 皆正常運作。
 - 設定頁「搬移 Vault 失敗」「存恢復金鑰檔案失敗」兩處訊息未接上多語言錯誤代碼系統。
 - App 圖示與 `.locked` 副檔名圖示已設計定案，尚未接進實際專案（`.csproj`、安裝程式檔案關聯）與匯出 `.ico`。
 - 正式安裝程式尚未開始，技術路線已定案（沿用 mac-style-windows-installer）。
