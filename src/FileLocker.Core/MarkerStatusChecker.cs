@@ -24,18 +24,18 @@ public static class MarkerStatusChecker
 
         if (!File.Exists(expectedPath))
         {
-            return new MarkerStatus(false, null, "指標檔可能被移動或刪除");
+            return new MarkerStatus(false, null, "指標檔可能被移動或刪除", Code: ErrorCodes.MarkerNotFound);
         }
 
         var marker = LockedMarkerFile.ReadFrom(expectedPath);
         if (marker is null)
         {
-            return new MarkerStatus(false, null, "原本位置的檔案無法解析為指標檔");
+            return new MarkerStatus(false, null, "原本位置的檔案無法解析為指標檔", Code: ErrorCodes.MarkerParseFailed);
         }
 
         if (marker.Uuid != uuid)
         {
-            return new MarkerStatus(false, null, "原本的位置已經被別的加密項目取代", ConflictingUuid: marker.Uuid);
+            return new MarkerStatus(false, null, "原本的位置已經被別的加密項目取代", Code: ErrorCodes.MarkerReplacedByOther, ConflictingUuid: marker.Uuid);
         }
 
         return new MarkerStatus(true, expectedPath, null);

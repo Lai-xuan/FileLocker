@@ -52,14 +52,16 @@ public sealed record VaultListItemResponse(
     string Uuid, string OriginalName, string OriginalPath, string Type,
     bool PasskeyEnabled, bool RecoveryKeyEnabled, string? BatchId, long OriginalSizeBytes,
     string? Hint, DateTimeOffset CreatedAtUtc, bool HasNestedLocks, int NestedLockCount,
-    bool MarkerFound, string? MarkerStatusMessage, IReadOnlyList<string> NestedLockItemNames)
+    bool MarkerFound, string? MarkerStatusMessage, IReadOnlyList<string> NestedLockItemNames,
+    string? MarkerStatusCode, string? MarkerStatusDetail)
 {
     public VaultListItemResponse(VaultIndexEntry entry, MarkerStatus markerStatus, IReadOnlyList<string> nestedLockItemNames)
         : this(
             entry.Uuid, entry.OriginalName, entry.OriginalPath, entry.Type.ToString(),
             entry.PasskeyEnabled, entry.RecoveryKeyEnabled, entry.BatchId, entry.OriginalSizeBytes,
             entry.Hint, entry.CreatedAtUtc, entry.NestedLockCount > 0, entry.NestedLockCount,
-            markerStatus.Found, markerStatus.Message, nestedLockItemNames)
+            markerStatus.Found, markerStatus.Message, nestedLockItemNames,
+            markerStatus.Code, markerStatus.Detail)
     {
     }
 }

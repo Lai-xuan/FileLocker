@@ -324,12 +324,22 @@ public sealed class VaultProtocolHandlers
                         var conflictingName = _vaultManager.LoadMetadata(conflictingUuid)?.OriginalName;
                         if (conflictingName is not null)
                         {
-                            markerStatus = markerStatus with { Message = $"指標檔已被「{conflictingName}」鎖定" };
+                            markerStatus = markerStatus with
+                            {
+                                Code = ErrorCodes.MarkerReplacedByOtherNamed,
+                                Detail = conflictingName,
+                                Message = $"指標檔已被「{conflictingName}」鎖定"
+                            };
                         }
                     }
                     else if (!markerStatus.Found && nestedContainerNames.TryGetValue(entry.Uuid, out var containerName))
                     {
-                        markerStatus = markerStatus with { Message = $"該檔案的指標檔已經收進「{containerName}」這個資料夾一起加密了" };
+                        markerStatus = markerStatus with
+                        {
+                            Code = ErrorCodes.MarkerPackedIntoContainer,
+                            Detail = containerName,
+                            Message = $"該檔案的指標檔已經收進「{containerName}」這個資料夾一起加密了"
+                        };
                     }
                     return new VaultListItemResponse(entry, markerStatus, containerNestedNames.GetValueOrDefault(entry.Uuid, []));
                 })

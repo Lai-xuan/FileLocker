@@ -357,8 +357,6 @@ watch(decryptPath, () => {
 })
 const decryptPassword = ref('')
 const isDecrypting = ref(false)
-const decryptResultMessage = ref('')
-const decryptResultIsError = ref(false)
 const decryptItemInfo = ref(null) // { uuid, originalName, hint, passkeyEnabled, recoveryKeyEnabled }
 
 // ---- 已加密檔案子頁籤 ----
@@ -487,10 +485,14 @@ const messageHandlers = {
 
   decryptResult(data) {
     isDecrypting.value = false
-    decryptResultIsError.value = !data.success
-    decryptResultMessage.value = data.success
-      ? t('decrypt.success', { path: data.restoredPath })
-      : translateError(data.errorCode, data.errorDetail, t('decrypt.failed', { error: data.errorMessage }))
+    // 跟 decryptByUuidResult／decryptByPasskeyResult／decryptByRecoveryKeyResult 用同一套
+    // toast 通知（會自動消失），不再用頁籤裡的常駐訊息——常駐訊息不會自己消失，切走頁籤/
+    // 切換語言/準備解下一個檔案時還留在原地，容易讓人誤以為是在講目前正在做的事。
+    if (data.success) {
+      showToast(t('decrypt.success', { path: data.restoredPath }), 'success')
+    } else {
+      showToast(translateError(data.errorCode, data.errorDetail, t('decrypt.failed', { error: data.errorMessage })))
+    }
     // 密碼一律清掉。路徑跟「其他解鎖方式」資訊只有失敗時才留著——失敗通常是密碼打錯，
     // 使用者想對同一個檔案重新輸入密碼，這種情況下路徑欄位跟 Passkey/恢復金鑰按鈕都還有效，
     // 留著方便直接重試。成功的話這個項目已經解密消失了，路徑跟按鈕都該一起清掉，
@@ -995,12 +997,10 @@ function finishEncryptBatch() {
 
 function submitDecrypt() {
   if (!decryptPath.value || !decryptPassword.value) {
-    decryptResultIsError.value = true
-    decryptResultMessage.value = t('decrypt.needPathAndPassword')
+    showToast(t('decrypt.needPathAndPassword'))
     return
   }
   isDecrypting.value = true
-  decryptResultMessage.value = ''
   window.chrome.webview.postMessage({
     type: 'decrypt',
     path: decryptPath.value,
@@ -1463,7 +1463,7 @@ function historyDetailText(entry) {
 
           <div class="field">
             <label class="field__label">{{ t('decrypt.passwordLabel') }}</label>
-            <input v-model="decryptPassword" type="password" class="text-input" />
+            <input v-model="decryptPassword" type="password" class="text-input" @keyup.enter="submitDecrypt" />
           </div>
 
           <button class="button button--primary" @click="submitDecrypt" :disabled="isDecrypting || !decryptPath || !decryptPassword">
@@ -1483,10 +1483,6 @@ function historyDetailText(entry) {
               </button>
             </div>
           </div>
-
-          <p v-if="decryptResultMessage" class="status-message" :class="decryptResultIsError ? 'status-message--error' : 'status-message--success'">
-            {{ decryptResultMessage }}
-          </p>
         </div>
 
         <div v-else-if="activeTab === 'list'" key="list">
@@ -1568,7 +1564,7 @@ function historyDetailText(entry) {
                       <td>
                         <div class="cell-name" :title="group.item.originalName">{{ group.item.originalName }}</div>
                         <span v-if="group.item.hasNestedLocks" class="badge badge--nested-lock" :title="nestedLockPreviewText(group.item)"><img :src="nestedLockIconUrl" alt="" class="badge__icon" />×{{ group.item.nestedLockCount }}</span>
-                        <div v-if="!group.item.markerFound" class="status-warning"><img :src="warningIconUrl" alt="" class="status-warning__icon" />{{ t('list.markerMissing', { message: group.item.markerStatusMessage }) }}</div>
+                        <div v-if="!group.item.markerFound" class="status-warning"><img :src="warningIconUrl" alt="" class="status-warning__icon" />{{ translateError(group.item.markerStatusCode, group.item.markerStatusDetail, group.item.markerStatusMessage) }}</div>
                       </td>
                       <td>{{ typeLabel(group.item.type) }}</td>
                       <td>{{ formatSize(group.item.originalSizeBytes) }}</td>
@@ -1633,7 +1629,7 @@ function historyDetailText(entry) {
                           <td>
                             <div class="cell-name" :title="item.originalName">{{ item.originalName }}</div>
                             <span v-if="item.hasNestedLocks" class="badge badge--nested-lock" :title="nestedLockPreviewText(item)"><img :src="nestedLockIconUrl" alt="" class="badge__icon" />×{{ item.nestedLockCount }}</span>
-                            <div v-if="!item.markerFound" class="status-warning"><img :src="warningIconUrl" alt="" class="status-warning__icon" />{{ t('list.markerMissing', { message: item.markerStatusMessage }) }}</div>
+                            <div v-if="!item.markerFound" class="status-warning"><img :src="warningIconUrl" alt="" class="status-warning__icon" />{{ translateError(item.markerStatusCode, item.markerStatusDetail, item.markerStatusMessage) }}</div>
                           </td>
                           <td>{{ typeLabel(item.type) }}</td>
                           <td>{{ formatSize(item.originalSizeBytes) }}</td>

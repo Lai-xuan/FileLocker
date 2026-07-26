@@ -38,4 +38,10 @@ public static class ErrorCodes
     public const string ContentCorruptedWithDetail = "CONTENT_CORRUPTED_WITH_DETAIL";
     public const string DecryptError = "DECRYPT_ERROR";
     public const string DecryptUnexpectedError = "DECRYPT_UNEXPECTED_ERROR";
+
+    public const string MarkerNotFound = "MARKER_NOT_FOUND";
+    public const string MarkerParseFailed = "MARKER_PARSE_FAILED";
+    public const string MarkerReplacedByOther = "MARKER_REPLACED_BY_OTHER";
+    public const string MarkerReplacedByOtherNamed = "MARKER_REPLACED_BY_OTHER_NAMED";
+    public const string MarkerPackedIntoContainer = "MARKER_PACKED_INTO_CONTAINER";
 }

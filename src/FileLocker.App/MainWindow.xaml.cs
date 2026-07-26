@@ -595,7 +595,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            SendToFrontend(new { type = "error", message = $"處理訊息時發生未預期的錯誤：{ex.Message}" });
+            SendToFrontend(new { type = "error", message = ex.Message });
         }
     }
 

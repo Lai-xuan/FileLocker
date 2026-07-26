@@ -30,4 +30,4 @@ public record VerifyPasswordResult(bool Success, string? ErrorMessage = null, st
 /// 不是掃描整個磁碟去找 .locked 檔案實際在哪——使用者若把它搬去別的地方，這裡就檢查不到，
 /// 這是設計上刻意的取捨（完整掃描成本太高、也不一定找得到）。
 /// </summary>
-public record MarkerStatus(bool Found, string? MarkerPath, string? Message, string? ConflictingUuid = null);
+public record MarkerStatus(bool Found, string? MarkerPath, string? Message, string? Code = null, string? Detail = null, string? ConflictingUuid = null);
