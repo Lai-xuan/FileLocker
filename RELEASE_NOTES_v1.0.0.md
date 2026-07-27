@@ -19,10 +19,10 @@ FileLocker 第一個正式版本。Windows 檔案／資料夾加密工具：檔�
 
 ### 已知限制
 
-- 尚無正式安裝程式與數位簽章（技術路線已定案：沿用 [mac-style-windows-installer](https://github.com/Lai-xuan/mac-style-windows-installer)）。
+- 安裝程式已透過我的另一個專案 [mac-style-windows-installer](https://github.com/Lai-xuan/mac-style-windows-installer) 打包完成並發布在本專案的 GitHub Releases，但尚未申請數位簽章，第一次執行時 Windows SmartScreen 可能會跳出警告，點「其他資訊」→「仍要執行」即可繼續安裝。
 - `.locked` 副檔名的檔案總管圖示關聯待安裝程式階段接入。
 - 雲端同步情境僅完成自動化測試，跨裝置人工實測待使用者自行進行。
-- CLI 尚未納入安裝包（獨立建置產物）；Passkey 因需要跳出系統 UI，設計上刻意不在 CLI 提供。
+- CLI 尚未納入安裝包（獨立建置產物）；Passkey 因需要跳出系統 UI，與命令行工具定位衝突，故不在 CLI 中提供。
 - 密碼遺失無法復原，沒有任何後門機制——請務必妥善保存密碼與恢復金鑰。
 
 ---
@@ -46,8 +46,8 @@ The first stable release of FileLocker — a Windows file/folder encryption tool
 
 ### Known limitations
 
-- No installer or code signing yet (direction decided: reusing [mac-style-windows-installer](https://github.com/Lai-xuan/mac-style-windows-installer)).
+- The installer is packaged with my other project [mac-style-windows-installer](https://github.com/Lai-xuan/mac-style-windows-installer) and published on this repo's GitHub Releases, but it isn't code-signed yet — Windows SmartScreen may warn on first run; click "More info" → "Run anyway" to continue.
 - The `.locked` file-association icon isn't wired up yet — pending the installer stage.
 - Cloud-sync scenarios have automated test coverage only; manual cross-device testing is still pending.
-- The CLI isn't bundled into the installer yet (separate build artifact); passkey support is intentionally excluded from the CLI since it requires system UI.
+- The CLI isn't bundled into the installer yet (separate build artifact); passkey requires system UI, which conflicts with the CLI's command-line-only design, so it isn't offered there.
 - A lost password cannot be recovered — there is no backdoor. Keep your password and recovery key safe.

@@ -22,6 +22,10 @@
 
 在檔案總管選取檔案或資料夾，右鍵一鍵加密：內容會被移到集中管理的 Vault，原位置只留下一個 `.locked` 指標檔。雙擊指標檔，或在 App 裡操作，輸入密碼（也可以用 Windows Hello Passkey，或事先存好的恢復金鑰）即可還原回原本位置。
 
+### 下載與安裝
+
+前往 [Releases](https://github.com/Lai-xuan/FileLocker/releases) 頁面下載最新安裝檔。安裝程式由作者自己開發的另一個專案 [mac-style-windows-installer](https://github.com/Lai-xuan/mac-style-windows-installer) 打包產生，目前尚未申請數位簽章，第一次執行時 Windows SmartScreen 可能會跳出警告——點「其他資訊」→「仍要執行」即可繼續安裝。
+
 - **Argon2id + AES-256-GCM**：密碼經 Argon2id 衍生金鑰，內容用 AES-256-GCM 串流分塊加密，加密大型資料夾也不需要把整份明文塞進記憶體。
 - **三種互相獨立的解鎖方式**：密碼（必要）、Passkey（Windows Hello，裝置綁定）、恢復金鑰（一次性顯示的備援代碼）。
 - **右鍵選單批次加密**：一次選取多個檔案/資料夾，右鍵直接加密；CLI 也支援批次加密／解密／刪除。
@@ -89,7 +93,7 @@ FileLocker/
 
 ### 已知限制
 
-- 尚無正式安裝程式與數位簽章（技術路線已定案，見規格文件第 19 節）。
+- 安裝程式尚無數位簽章，執行時可能觸發 Windows SmartScreen 警告（見上方「下載與安裝」與規格文件第 19 節）。
 - 雲端同步情境的跨裝置人工實測尚待進行。
 - 密碼遺失無法復原，沒有任何後門機制。
 
@@ -104,6 +108,10 @@ FileLocker/
 ### What is this
 
 Select files or folders in File Explorer, right-click to encrypt: contents move into a centrally managed Vault, leaving only a `.locked` marker file in the original location. Double-click the marker (or use the app) and enter your password — or unlock with a Windows Hello passkey, or a pre-saved recovery key — to restore it back in place.
+
+### Download & install
+
+Grab the latest installer from the [Releases](https://github.com/Lai-xuan/FileLocker/releases) page. It's built with [mac-style-windows-installer](https://github.com/Lai-xuan/mac-style-windows-installer), another project by the same author. It isn't code-signed yet, so Windows SmartScreen may warn on first run — click "More info" → "Run anyway" to continue.
 
 - **Argon2id + AES-256-GCM**: passwords are stretched with Argon2id; content is encrypted with chunked, streaming AES-256-GCM, so even large folders never need to sit fully in memory.
 - **Three independent unlock methods**: password (required), passkey (Windows Hello, device-bound), and a one-time-shown recovery key.
@@ -172,7 +180,7 @@ FileLocker/
 
 ### Known limitations
 
-- No installer or code signing yet (technical direction decided, see spec §19).
+- The installer isn't code-signed yet, which may trigger a Windows SmartScreen warning (see "Download & install" above and spec §19).
 - Manual cross-device testing of cloud-sync scenarios is still pending.
 - A lost password cannot be recovered — there is no backdoor.
 
