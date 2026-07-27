@@ -43,7 +43,7 @@ public sealed record SettingsResponse(string? VaultPath, string Language, string
 public sealed record UpdateSettingResponse(bool Success, string Key, string Value);
 
 /// <summary>RequiresRestart 只有在搬移成功時才有意義，失敗時前端不會去看這個欄位。</summary>
-public sealed record ChangeVaultPathResponse(bool Success, string? NewPath, string? ErrorMessage)
+public sealed record ChangeVaultPathResponse(bool Success, string? NewPath, string? ErrorMessage, string? ErrorCode = null, string? ErrorDetail = null)
 {
     public bool RequiresRestart => Success;
 }

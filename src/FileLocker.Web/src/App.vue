@@ -610,7 +610,7 @@ const messageHandlers = {
     if (data.success) {
       recoveryKeySaveState.value = 'saved'
     } else if (!data.cancelled) {
-      showToast(t('alert.saveFileFailed', { error: data.errorMessage }))
+      showToast(translateError(data.errorCode, data.errorDetail, t('alert.saveFileFailed', { error: data.errorMessage })))
     }
   },
 
@@ -768,7 +768,7 @@ const messageHandlers = {
       settingsVaultPath.value = data.newPath
       settingsSaveMessage.value = t('settings.vaultMoveSuccess')
     } else {
-      showToast(t('settings.vaultMoveFailed', { error: data.errorMessage }))
+      showToast(translateError(data.errorCode, data.errorDetail, t('settings.vaultMoveFailed', { error: data.errorMessage })))
     }
   },
 

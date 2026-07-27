@@ -36,11 +36,11 @@ switch (command)
 {
     case "--encrypt":
         RequireArgs(2);
-        await EncryptCommandAsync(args[1]);
+        await EncryptCommandAsync(args[1..]);
         break;
     case "--unlock":
         RequireArgs(2);
-        await UnlockCommandAsync(args[1]);
+        await UnlockCommandAsync(args[1..]);
         break;
     case "--unlock-recovery":
         RequireArgs(3);
@@ -51,7 +51,7 @@ switch (command)
         break;
     case "--delete":
         RequireArgs(2);
-        await DeleteCommandAsync(args[1]);
+        await DeleteCommandAsync(args[1..]);
         break;
     default:
         PrintUsage();
@@ -67,11 +67,15 @@ void RequireArgs(int minCount)
     }
 }
 
-async Task EncryptCommandAsync(string targetPath)
+async Task EncryptCommandAsync(string[] targetPaths)
 {
-    if (!File.Exists(targetPath) && !Directory.Exists(targetPath))
+    var missing = targetPaths.Where(p => !File.Exists(p) && !Directory.Exists(p)).ToList();
+    if (missing.Count > 0)
     {
-        Console.WriteLine($"錯誤：找不到 {targetPath}");
+        foreach (var path in missing)
+        {
+            Console.WriteLine($"錯誤：找不到 {path}");
+        }
         return;
     }
 
@@ -99,34 +103,54 @@ async Task EncryptCommandAsync(string targetPath)
     Console.Write("密碼提示（可留空，直接按 Enter）：");
     var hint = Console.ReadLine();
 
+    // 選了不只一個項目才需要分組——單一項目沒有「摺疊」的意義，維持 batchId = null，
+    // 跟 GUI 端 VaultProtocolHandlers.EncryptBatchAsync 同一套邏輯。
+    var batchId = targetPaths.Length > 1 ? Guid.NewGuid().ToString() : null;
+
     // Passkey 刻意不在 CLI 提供——WinRT KeyCredentialManager 會跳出 Windows Hello 系統 UI，
     // 這是無 GUI 環境的存在意義相衝突的功能，之後如果要支援也應該是另一個獨立指令，不是這裡硬塞。
     Console.WriteLine("加密中...");
-    var result = await service.EncryptAsync(
-        targetPath, password, string.IsNullOrWhiteSpace(hint) ? null : hint,
-        enableRecoveryKey: enableRecoveryKey);
-
-    if (result.Success)
+    var successCount = 0;
+    foreach (var targetPath in targetPaths)
     {
-        Console.WriteLine("加密成功！");
-        Console.WriteLine($"  UUID：{result.Uuid}");
-        Console.WriteLine($"  指標檔位置：{result.LockedMarkerPath}");
-        if (!string.IsNullOrEmpty(result.RecoveryKey))
+        var result = await service.EncryptAsync(
+            targetPath, password, string.IsNullOrWhiteSpace(hint) ? null : hint,
+            enablePasskey: false, ownerWindowHandle: IntPtr.Zero,
+            enableRecoveryKey: enableRecoveryKey, batchId: batchId);
+
+        if (result.Success)
         {
-            Console.WriteLine($"  恢復金鑰（請妥善保存，不會再顯示第二次）：{result.RecoveryKey}");
+            successCount++;
+            Console.WriteLine($"加密成功：{targetPath}");
+            Console.WriteLine($"  UUID：{result.Uuid}");
+            Console.WriteLine($"  指標檔位置：{result.LockedMarkerPath}");
+            if (!string.IsNullOrEmpty(result.RecoveryKey))
+            {
+                Console.WriteLine($"  恢復金鑰（請妥善保存，不會再顯示第二次）：{result.RecoveryKey}");
+            }
+        }
+        else
+        {
+            Console.WriteLine($"加密失敗：{targetPath}");
+            Console.WriteLine($"  {result.ErrorMessage}");
         }
     }
-    else
+
+    if (targetPaths.Length > 1)
     {
-        Console.WriteLine($"加密失敗：{result.ErrorMessage}");
+        Console.WriteLine($"完成：{successCount} 筆成功、{targetPaths.Length - successCount} 筆失敗。");
     }
 }
 
-async Task UnlockCommandAsync(string markerPath)
+async Task UnlockCommandAsync(string[] markerPaths)
 {
-    if (!File.Exists(markerPath))
+    var missing = markerPaths.Where(p => !File.Exists(p)).ToList();
+    if (missing.Count > 0)
     {
-        Console.WriteLine($"錯誤：找不到指標檔 {markerPath}");
+        foreach (var path in missing)
+        {
+            Console.WriteLine($"錯誤：找不到指標檔 {path}");
+        }
         return;
     }
 
@@ -135,9 +159,27 @@ async Task UnlockCommandAsync(string markerPath)
     Console.WriteLine();
 
     Console.WriteLine("解密中...");
-    var result = await service.DecryptAsync(markerPath, password);
+    var successCount = 0;
+    foreach (var markerPath in markerPaths)
+    {
+        if (markerPaths.Length > 1)
+        {
+            Console.WriteLine(markerPath);
+        }
 
-    PrintUnlockResult(result);
+        var result = await service.DecryptAsync(markerPath, password);
+        if (result.Success)
+        {
+            successCount++;
+        }
+
+        PrintUnlockResult(result);
+    }
+
+    if (markerPaths.Length > 1)
+    {
+        Console.WriteLine($"完成：{successCount} 筆成功、{markerPaths.Length - successCount} 筆失敗。");
+    }
 }
 
 async Task UnlockByRecoveryKeyCommandAsync(string uuid, string recoveryKey, string? destinationDir)
@@ -196,9 +238,21 @@ string FormatSize(long bytes)
     return $"{size.ToString("0.##", CultureInfo.InvariantCulture)} {units[unitIndex]}";
 }
 
-async Task DeleteCommandAsync(string uuid)
+async Task DeleteCommandAsync(string[] uuids)
 {
-    Console.Write($"確定要永久刪除 {uuid} 嗎？此動作無法復原 (y/N)：");
+    if (uuids.Length > 1)
+    {
+        Console.WriteLine("確定要永久刪除以下項目嗎？此動作無法復原：");
+        foreach (var id in uuids)
+        {
+            Console.WriteLine($"  {id}");
+        }
+        Console.Write("(y/N)：");
+    }
+    else
+    {
+        Console.Write($"確定要永久刪除 {uuids[0]} 嗎？此動作無法復原 (y/N)：");
+    }
     var confirm = (Console.ReadLine() ?? "").Trim();
     if (!confirm.Equals("y", StringComparison.OrdinalIgnoreCase))
     {
@@ -206,31 +260,42 @@ async Task DeleteCommandAsync(string uuid)
         return;
     }
 
-    var result = await service.TryDeleteRecordAsync(uuid);
+    var successCount = 0;
+    foreach (var uuid in uuids)
+    {
+        var result = await service.TryDeleteRecordAsync(uuid);
 
-    // CLI 沒有 GUI 那層 VaultIndexCache（SQLite 加速索引），每次都是直接掃 .meta.json，
-    // 沒有「快取殘留孤兒紀錄」這個問題可言——RecordNotFound 這裡就是單純的「查無此 uuid」。
-    if (!result.Success && result.ErrorCode == ErrorCodes.RecordNotFound)
-    {
-        Console.WriteLine($"找不到 UUID 為 {uuid} 的加密紀錄。");
-        return;
-    }
-
-    if (result.Success)
-    {
-        Console.WriteLine("刪除成功。");
-    }
-    else if (result.BlockedByNestedLocks)
-    {
-        Console.WriteLine("刪除失敗：資料夾內還有巢狀加密項目，請先個別處理：");
-        foreach (var nestedUuid in result.NestedUuids ?? [])
+        // CLI 沒有 GUI 那層 VaultIndexCache（SQLite 加速索引），每次都是直接掃 .meta.json，
+        // 沒有「快取殘留孤兒紀錄」這個問題可言——RecordNotFound 這裡就是單純的「查無此 uuid」。
+        if (!result.Success && result.ErrorCode == ErrorCodes.RecordNotFound)
         {
-            Console.WriteLine($"  {nestedUuid}");
+            Console.WriteLine($"找不到 UUID 為 {uuid} 的加密紀錄。");
+            continue;
+        }
+
+        if (result.Success)
+        {
+            successCount++;
+            Console.WriteLine($"刪除成功：{uuid}");
+        }
+        else if (result.BlockedByNestedLocks)
+        {
+            Console.WriteLine($"刪除失敗：{uuid}（資料夾內還有巢狀加密項目，請先個別處理）：");
+            foreach (var nestedUuid in result.NestedUuids ?? [])
+            {
+                Console.WriteLine($"  {nestedUuid}");
+            }
+        }
+        else
+        {
+            Console.WriteLine($"刪除失敗：{uuid}");
+            Console.WriteLine($"  {result.ErrorMessage}");
         }
     }
-    else
+
+    if (uuids.Length > 1)
     {
-        Console.WriteLine($"刪除失敗：{result.ErrorMessage}");
+        Console.WriteLine($"完成：{successCount} 筆成功、{uuids.Length - successCount} 筆失敗。");
     }
 }
 
@@ -273,11 +338,12 @@ string ReadPassword()
 void PrintUsage()
 {
     Console.WriteLine("用法：");
-    Console.WriteLine("  FileLocker.Cli --encrypt <檔案或資料夾路徑>");
-    Console.WriteLine("  FileLocker.Cli --unlock <.locked 檔案路徑>");
+    Console.WriteLine("  FileLocker.Cli --encrypt <檔案或資料夾路徑> [路徑2 ...]");
+    Console.WriteLine("  FileLocker.Cli --unlock <.locked 檔案路徑> [路徑2 ...]");
     Console.WriteLine("  FileLocker.Cli --unlock-recovery <uuid> <恢復金鑰> [還原目的地資料夾]");
     Console.WriteLine("  FileLocker.Cli --list");
-    Console.WriteLine("  FileLocker.Cli --delete <uuid>");
+    Console.WriteLine("  FileLocker.Cli --delete <uuid> [uuid2 ...]");
     Console.WriteLine();
+    Console.WriteLine("--encrypt／--unlock／--delete 都支援一次傳多個路徑或 uuid：密碼（或刪除確認）只問一次，套用到所有項目，個別項目的成功/失敗各自列出。");
     Console.WriteLine("環境變數 FILELOCKER_VAULT_PATH 可以覆寫預設 Vault 位置（未設定時跟主程式共用同一個預設路徑）。");
 }

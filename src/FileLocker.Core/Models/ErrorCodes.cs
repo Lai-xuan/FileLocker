@@ -44,4 +44,9 @@ public static class ErrorCodes
     public const string MarkerReplacedByOther = "MARKER_REPLACED_BY_OTHER";
     public const string MarkerReplacedByOtherNamed = "MARKER_REPLACED_BY_OTHER_NAMED";
     public const string MarkerPackedIntoContainer = "MARKER_PACKED_INTO_CONTAINER";
+
+    public const string VaultMoveSamePath = "VAULT_MOVE_SAME_PATH";
+    public const string VaultMoveDestinationNotEmpty = "VAULT_MOVE_DESTINATION_NOT_EMPTY";
+    public const string VaultMoveIoError = "VAULT_MOVE_IO_ERROR";
+    public const string RecoveryKeySaveError = "RECOVERY_KEY_SAVE_ERROR";
 }

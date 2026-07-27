@@ -260,12 +260,12 @@ public sealed class VaultProtocolHandlers
 
         if (string.Equals(Path.GetFullPath(newPath), Path.GetFullPath(currentPath), StringComparison.OrdinalIgnoreCase))
         {
-            return new ChangeVaultPathResponse(false, null, "新位置跟目前位置相同，不需要搬移。");
+            return new ChangeVaultPathResponse(false, null, "新位置跟目前位置相同，不需要搬移。", ErrorCodes.VaultMoveSamePath);
         }
 
         if (Directory.Exists(newPath) && Directory.EnumerateFileSystemEntries(newPath).Any())
         {
-            return new ChangeVaultPathResponse(false, null, "新位置的資料夾不是空的，請選一個空資料夾，避免跟裡面既有的檔案混在一起。");
+            return new ChangeVaultPathResponse(false, null, "新位置的資料夾不是空的，請選一個空資料夾，避免跟裡面既有的檔案混在一起。", ErrorCodes.VaultMoveDestinationNotEmpty);
         }
 
         try
@@ -279,7 +279,7 @@ public sealed class VaultProtocolHandlers
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return new ChangeVaultPathResponse(false, null, $"搬移失敗：{ex.Message}");
+            return new ChangeVaultPathResponse(false, null, $"搬移失敗：{ex.Message}", ErrorCodes.VaultMoveIoError, ex.Message);
         }
     }
 

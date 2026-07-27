@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Interop;
 using FileLocker.Core;
 using FileLocker.Core.History;
+using FileLocker.Core.Models;
 using FileLocker.Core.Protocol;
 using FileLocker.Core.Settings;
 using FileLocker.Core.Vault;
@@ -568,7 +569,7 @@ public partial class MainWindow : Window
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                SendToFrontend(new { type = "saveRecoveryKeyToFileResult", success = false, errorMessage = ex.Message });
+                SendToFrontend(new { type = "saveRecoveryKeyToFileResult", success = false, errorMessage = ex.Message, errorCode = ErrorCodes.RecoveryKeySaveError, errorDetail = ex.Message });
             }
         }
         else
@@ -699,6 +700,8 @@ public partial class MainWindow : Window
             result.Success,
             newPath = result.NewPath,
             result.ErrorMessage,
+            result.ErrorCode,
+            result.ErrorDetail,
             result.RequiresRestart
         });
     }
