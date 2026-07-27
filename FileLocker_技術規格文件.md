@@ -664,3 +664,4 @@ HKEY_CLASSES_ROOT\FileLocker.LockedFile\shell\open\command
 - 沒有數位簽章，也沒有執行檔完整性驗證機制（詳見第 19 節的評估與取捨）。
 - 雲端同步情境僅完成自動化測試，跨裝置的完整人工實測待使用者自行進行。
 - 沒有檢查更新機制（尚未開始）：等正式安裝程式的散布方式定案後再設計，更新流程通常跟安裝程式格式（MSI/MSIX）綁在一起，現在做容易白工。
+- 安裝包目前只打算納入 GUI（`FileLocker.App`），CLI（`FileLocker.Cli`）尚未一起發布：兩者是獨立的建置產物，`FileLocker.App.csproj` 沒有引用 CLI 專案，Release 輸出資料夾裡不會自動有 `FileLocker.Cli.exe`。之後如果要一併發布，需要另外 `dotnet build src/FileLocker.Cli -c Release`，把輸出複製進安裝內容資料夾，並在安裝程式裡把該路徑加入系統 PATH（CLI 是設計給終端機/腳本用的，不加 PATH 使用上很不方便；GUI 本身不需要加 PATH）。

@@ -69,7 +69,15 @@ public partial class MainWindow : Window
 
         Loaded += async (_, _) =>
         {
-            await MainWebView.EnsureCoreWebView2Async();
+            // 明確指定使用者資料目錄，不依賴 WebView2 預設「在執行檔旁邊建資料夾」的行為——
+            // 安裝到 C:\Program Files\ 之類系統保護目錄時，一般使用者權限沒辦法在執行檔旁邊
+            // 寫入，會導致 WebView2 完全開不起來（「無法讀取及寫入其資料目錄」）。改成固定
+            // 指向使用者自己的 %LocalAppData%，不管安裝到哪裡、有沒有系統管理員權限都能寫入。
+            var webView2UserDataFolder = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "FileLocker", "WebView2");
+            var webView2Environment = await CoreWebView2Environment.CreateAsync(userDataFolder: webView2UserDataFolder);
+            await MainWebView.EnsureCoreWebView2Async(webView2Environment);
 
             // WebView2 安全性硬化：
             // 1. 關掉密碼自動儲存/自動填入——不關的話，使用者在加密/解密表單輸入的密碼可能被
