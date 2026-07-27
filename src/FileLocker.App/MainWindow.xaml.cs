@@ -357,7 +357,8 @@ public partial class MainWindow : Window
         // 每完成一個項目就馬上回報，前端可以即時更新清單，不用等全部跑完才看到結果——
         // 這裡只負責「收到一筆就送一次 WebView2 訊息」，逐項的業務邏輯在 EncryptBatchAsync 裡。
         await foreach (var item in _protocolHandlers.EncryptBatchAsync(
-            paths, password, hint, enablePasskey, enableRecoveryKey, ownerWindowHandle))
+            paths, password, hint, enablePasskey, enableRecoveryKey, ownerWindowHandle,
+            verifying => SendToFrontend(new { type = "encryptPasskeyVerifying", verifying })))
         {
             if (item.Success)
             {

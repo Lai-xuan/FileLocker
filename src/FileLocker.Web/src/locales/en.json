@@ -209,5 +209,6 @@
   "help.criticalActionTitle": "Critical Action Verification",
   "help.criticalActionBody": "Critical Action Verification can be enabled in Settings. Once enabled, destructive operations such as clearing activity history require Windows Hello verification before they can proceed; if also enabled, moving the Vault location is gated behind the same verification. Disabling this feature likewise requires passing Windows Hello verification first, preventing anyone who already has access to the device from simply turning off this protection.",
   "encrypt.dropHint": "Drag files or folders here, or use the buttons below",
-  "encrypt.compressing": "Compressing... ({current}/{total})"
+  "encrypt.compressing": "Compressing... ({current}/{total})",
+  "encrypt.waitingPasskey": "Waiting for Windows Hello verification..."
 }

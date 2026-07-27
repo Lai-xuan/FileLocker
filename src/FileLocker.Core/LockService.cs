@@ -40,7 +40,8 @@ public class LockService
         string path, string password, string? hint,
         bool enablePasskey = false, IntPtr ownerWindowHandle = default,
         bool enableRecoveryKey = false, string? batchId = null,
-        IProgress<double>? progress = null)
+        IProgress<double>? progress = null,
+        Action<bool>? onPasskeyVerifying = null)
     {
         var isFolder = Directory.Exists(path);
         var isFile = File.Exists(path);
@@ -95,32 +96,43 @@ public class LockService
             // 驗證失敗）都不影響密碼加密本身的成功與否，只是這個項目最終沒有啟用 Passkey 快速解鎖。
             if (enablePasskey && await PasskeyProtector.IsSupportedAsync())
             {
-                var credentialName = PasskeyProtector.GenerateCredentialName();
-                if (await PasskeyProtector.CreateCredentialAsync(credentialName, ownerWindowHandle))
+                // 這段期間會跳出 Windows Hello 系統 UI 並阻塞等待使用者操作，前端的假進度條完全
+                // 感知不到——用這個回呼讓呼叫端（App 層）通知前端暫停動畫，避免進度條在使用者
+                // 還沒完成驗證時繼續自顧自往前跑。
+                onPasskeyVerifying?.Invoke(true);
+                try
                 {
-                    var challenge = PasskeyProtector.GenerateChallenge();
-                    var signature = await PasskeyProtector.SignChallengeAsync(credentialName, challenge, ownerWindowHandle);
+                    var credentialName = PasskeyProtector.GenerateCredentialName();
+                    if (await PasskeyProtector.CreateCredentialAsync(credentialName, ownerWindowHandle))
+                    {
+                        var challenge = PasskeyProtector.GenerateChallenge();
+                        var signature = await PasskeyProtector.SignChallengeAsync(credentialName, challenge, ownerWindowHandle);
 
-                    if (signature is not null)
-                    {
-                        var wrappingKey = PasskeyProtector.DeriveWrappingKey(signature);
-                        try
+                        if (signature is not null)
                         {
-                            passkeyWrappedKeyBase64 = PasskeyProtector.WrapContentKey(wrappingKey, encryptResult.EncryptionKey!);
-                            passkeyCredentialName = credentialName;
-                            passkeyChallengeBase64 = Convert.ToBase64String(challenge);
+                            var wrappingKey = PasskeyProtector.DeriveWrappingKey(signature);
+                            try
+                            {
+                                passkeyWrappedKeyBase64 = PasskeyProtector.WrapContentKey(wrappingKey, encryptResult.EncryptionKey!);
+                                passkeyCredentialName = credentialName;
+                                passkeyChallengeBase64 = Convert.ToBase64String(challenge);
+                            }
+                            finally
+                            {
+                                CryptographicOperations.ZeroMemory(wrappingKey);
+                                CryptographicOperations.ZeroMemory(signature);
+                            }
                         }
-                        finally
+                        else
                         {
-                            CryptographicOperations.ZeroMemory(wrappingKey);
-                            CryptographicOperations.ZeroMemory(signature);
+                            // 使用者取消或驗證失敗：清掉剛剛建立的裝置金鑰，不留下一把沒被用到的憑證。
+                            await PasskeyProtector.DeleteCredentialAsync(credentialName);
                         }
                     }
-                    else
-                    {
-                        // 使用者取消或驗證失敗：清掉剛剛建立的裝置金鑰，不留下一把沒被用到的憑證。
-                        await PasskeyProtector.DeleteCredentialAsync(credentialName);
-                    }
+                }
+                finally
+                {
+                    onPasskeyVerifying?.Invoke(false);
                 }
             }
 

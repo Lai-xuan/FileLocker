@@ -339,6 +339,26 @@ public partial class PasswordPromptWindow : Window
     private void CancelButton_Click(object sender, RoutedEventArgs e) => Close();
 
     /// <summary>
+    /// 兩段式 Esc：在恢復金鑰頁按 Esc 先切回密碼頁（跟按「返回使用密碼」同一個效果），
+    /// 密碼頁再按一次才真正關閉視窗——避免使用者在恢復金鑰頁誤按 Esc 就整個退出，
+    /// 白白弄丟已經切換過頁面、甚至已經輸入到一半的內容。
+    /// </summary>
+    private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape || _isBusy) return;
+
+        if (_mode == UnlockInputMode.RecoveryKey)
+        {
+            BackToPasswordButton_Click(sender, e);
+        }
+        else
+        {
+            Close();
+        }
+        e.Handled = true;
+    }
+
+    /// <summary>
     /// 標題列（自訂畫的，不是原生標題列）按下左鍵直接呼叫 WPF 原生的 DragMove() 拖曳整個視窗——
     /// 不需要主視窗那套 WebView2 app-region 機制，這裡是純 WPF 內容，DragMove 本來就是給
     /// 這種情境用的標準做法。左上角的關閉圓形按鈕是獨立的 Button，點擊事件會被它自己吃掉、

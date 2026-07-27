@@ -42,7 +42,8 @@ public sealed class VaultProtocolHandlers
 
     public async IAsyncEnumerable<EncryptItemResponse> EncryptBatchAsync(
         IReadOnlyList<string> paths, string password, string? hint,
-        bool enablePasskey, bool enableRecoveryKey, IntPtr ownerWindowHandle)
+        bool enablePasskey, bool enableRecoveryKey, IntPtr ownerWindowHandle,
+        Action<bool>? onPasskeyVerifying = null)
     {
         // 選了不只一個項目才需要分組——單一項目沒有「摺疊」的意義，維持 batchId = null。
         var batchId = paths.Count > 1 ? Guid.NewGuid().ToString() : null;
@@ -51,7 +52,8 @@ public sealed class VaultProtocolHandlers
         {
             var result = await _lockService.EncryptAsync(
                 path, password, string.IsNullOrWhiteSpace(hint) ? null : hint,
-                enablePasskey, ownerWindowHandle, enableRecoveryKey, batchId);
+                enablePasskey, ownerWindowHandle, enableRecoveryKey, batchId,
+                onPasskeyVerifying: onPasskeyVerifying);
 
             var actuallyPasskeyEnabled = false;
             if (result.Success)

@@ -264,6 +264,10 @@ let progressAnimationFrame = null
 let progressStartedAt = 0
 let progressEstimatedDurationMs = 0
 let progressCompressionMs = 0
+// Passkey（Windows Hello）驗證期間會阻塞等待使用者操作，這段時間要從動畫的已耗時裡扣掉，
+// 不然恢復後 elapsed 會突然多算一大截，畫面上進度條像是瞬間跳了一段。
+let progressPausedAt = 0
+let progressTotalPausedMs = 0
 
 function requestPathSizes(paths) {
   return requestMessage('getPathSizes', 'pathSizesResult', { paths })
@@ -306,9 +310,13 @@ function estimateEncryptPhases(itemCount, items) {
   return { totalMs, compressionMs }
 }
 
+let progressTickFn = null
+
 function startFakeProgress(itemCount, items) {
   cancelFakeProgress()
   encryptProgressPercent.value = 0
+  progressPausedAt = 0
+  progressTotalPausedMs = 0
 
   const hasFolder = items.some((item) => item.isFolder)
   const { totalMs, compressionMs } = estimateEncryptPhases(itemCount, items)
@@ -317,8 +325,8 @@ function startFakeProgress(itemCount, items) {
   progressCompressionMs = compressionMs
   encryptPhaseLabel.value = hasFolder && compressionMs > 0 ? 'compressing' : 'encrypting'
 
-  const tick = (now) => {
-    const elapsed = now - progressStartedAt
+  progressTickFn = (now) => {
+    const elapsed = now - progressStartedAt - progressTotalPausedMs
     const t = Math.min(1, elapsed / progressEstimatedDurationMs)
     // 前快後慢的緩動曲線——一開始跑得比較快，愈接近預估時間愈慢。故意只逼近 92%，
     // 不會自己衝到 100%：真正的完成要等後端回報，避免進度條在實際做完之前就宣告結束，
@@ -327,10 +335,10 @@ function startFakeProgress(itemCount, items) {
     encryptProgressPercent.value = Math.min(92, eased * 92)
     encryptPhaseLabel.value = (hasFolder && elapsed < progressCompressionMs) ? 'compressing' : 'encrypting'
     if (t < 1) {
-      progressAnimationFrame = requestAnimationFrame(tick)
+      progressAnimationFrame = requestAnimationFrame(progressTickFn)
     }
   }
-  progressAnimationFrame = requestAnimationFrame(tick)
+  progressAnimationFrame = requestAnimationFrame(progressTickFn)
 }
 
 function cancelFakeProgress() {
@@ -340,8 +348,28 @@ function cancelFakeProgress() {
   }
 }
 
+// 後端跳出 Windows Hello 驗證視窗、阻塞等待使用者操作時呼叫——停止動畫並把耗時定格在
+// 目前的百分比，不讓假進度條在使用者還沒完成驗證前繼續往前跑。
+function pauseFakeProgress() {
+  if (progressPausedAt !== 0) return // 已經是暫停狀態，不重複記錄
+  cancelFakeProgress()
+  progressPausedAt = performance.now()
+  encryptPhaseLabel.value = 'waitingPasskey'
+}
+
+// Windows Hello 驗證結束（不論成功/取消/失敗）後呼叫——把剛剛暫停掉的時間長度累加進
+// 「總暫停時長」，讓動畫從暫停前的進度接著跑，不會因為扣掉暫停時間而整段跳過去。
+function resumeFakeProgress() {
+  if (progressPausedAt === 0 || progressTickFn === null) return
+  progressTotalPausedMs += performance.now() - progressPausedAt
+  progressPausedAt = 0
+  progressAnimationFrame = requestAnimationFrame(progressTickFn)
+}
+
 function finishFakeProgress() {
   cancelFakeProgress()
+  progressTickFn = null
+  progressPausedAt = 0
   encryptProgressPercent.value = 100
   setTimeout(() => { encryptProgressPercent.value = 0 }, 350)
 }
@@ -463,6 +491,14 @@ const messageHandlers = {
   encryptBatchStarted(data) {
     encryptBatchTotal.value = data.totalCount
     encryptItemResults.value = []
+  },
+
+  encryptPasskeyVerifying(data) {
+    if (data.verifying) {
+      pauseFakeProgress()
+    } else {
+      resumeFakeProgress()
+    }
   },
 
   encryptItemResult(data) {
@@ -1482,7 +1518,7 @@ function historyDetailText(entry) {
               </button>
               <button class="button button--primary" @click="submitEncrypt" :disabled="isEncrypting">
                 {{ isEncrypting
-                  ? t(encryptPhaseLabel === 'compressing' ? 'encrypt.compressing' : 'encrypt.encrypting', { current: encryptItemResults.length, total: encryptBatchTotal })
+                  ? t(encryptPhaseLabel === 'waitingPasskey' ? 'encrypt.waitingPasskey' : (encryptPhaseLabel === 'compressing' ? 'encrypt.compressing' : 'encrypt.encrypting'), { current: encryptItemResults.length, total: encryptBatchTotal })
                   : t('encrypt.submit') }}
               </button>
             </div>

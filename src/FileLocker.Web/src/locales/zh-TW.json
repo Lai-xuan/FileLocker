@@ -209,5 +209,6 @@
   "help.criticalActionTitle": "關鍵操作驗證",
   "help.criticalActionBody": "可於設定頁另外啟用「關鍵操作驗證」。啟用後，清除使用紀錄等具破壞性的操作，須先通過一次 Windows Hello 驗證才能執行；若同時啟用，搬移 Vault 位置也會納入此驗證。停用此功能同樣須先通過 Windows Hello 驗證，避免已取得裝置操作權限的第三人逕自關閉此項保護。",
   "encrypt.dropHint": "把檔案或資料夾拖到這裡，或用下面的按鈕選擇",
-  "encrypt.compressing": "壓縮中... ({current}/{total})"
+  "encrypt.compressing": "壓縮中... ({current}/{total})",
+  "encrypt.waitingPasskey": "等待 Windows Hello 驗證..."
 }
