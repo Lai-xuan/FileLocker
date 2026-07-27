@@ -90,4 +90,17 @@ public class HistoryLogger
 
         return results;
     }
+
+    /// <summary>清空所有歷史紀錄。呼叫端（VaultProtocolHandlers.ClearHistory）在呼叫這裡之前
+    /// 已經完成 Windows Hello 驗證，這裡本身不做任何驗證，純粹是檔案清空動作。</summary>
+    public void ClearAll()
+    {
+        lock (WriteLock)
+        {
+            if (File.Exists(_historyFilePath))
+            {
+                File.WriteAllText(_historyFilePath, string.Empty);
+            }
+        }
+    }
 }

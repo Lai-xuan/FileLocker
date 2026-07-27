@@ -38,7 +38,7 @@ public sealed record InspectLockedFileResponse(
 
 public sealed record PathSizeInfo(long Bytes, bool IsFolder);
 
-public sealed record SettingsResponse(string? VaultPath, string Language, string Theme);
+public sealed record SettingsResponse(string? VaultPath, string Language, string Theme, bool CriticalActionConfigured);
 
 public sealed record UpdateSettingResponse(bool Success, string Key, string Value);
 

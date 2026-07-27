@@ -270,6 +270,22 @@ public partial class MainWindow : Window
                     HandleGetSettingsRequest();
                     break;
 
+                case "setupCriticalAction":
+                    await HandleSetupCriticalActionRequestAsync();
+                    break;
+
+                case "verifyCriticalAction":
+                    await HandleVerifyCriticalActionRequestAsync();
+                    break;
+
+                case "clearHistory":
+                    HandleClearHistoryRequest();
+                    break;
+
+                case "disableCriticalAction":
+                    await HandleDisableCriticalActionRequestAsync();
+                    break;
+
                 case "pickVaultFolder":
                     HandlePickVaultFolder();
                     break;
@@ -620,7 +636,33 @@ public partial class MainWindow : Window
     private void HandleGetSettingsRequest()
     {
         var settings = _protocolHandlers.GetSettings();
-        SendToFrontend(new { type = "settingsResult", settings.VaultPath, settings.Language, settings.Theme });
+        SendToFrontend(new { type = "settingsResult", settings.VaultPath, settings.Language, settings.Theme, settings.CriticalActionConfigured });
+    }
+
+    private async Task HandleSetupCriticalActionRequestAsync()
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+        var success = await _protocolHandlers.SetupCriticalActionAsync(hwnd);
+        SendToFrontend(new { type = "setupCriticalActionResult", success });
+    }
+
+    private async Task HandleVerifyCriticalActionRequestAsync()
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+        var success = await _protocolHandlers.VerifyCriticalActionAsync(hwnd);
+        SendToFrontend(new { type = "verifyCriticalActionResult", success });
+    }
+
+    private void HandleClearHistoryRequest()
+    {
+        _protocolHandlers.ClearHistory();
+        SendToFrontend(new { type = "clearHistoryResult", success = true });
+    }
+
+    private async Task HandleDisableCriticalActionRequestAsync()
+    {
+        await _protocolHandlers.DisableCriticalActionAsync();
+        SendToFrontend(new { type = "disableCriticalActionResult", success = true });
     }
 
     private void HandlePickVaultFolder()

@@ -1,4 +1,6 @@
+using System.Security.Cryptography;
 using System.Text.Json;
+using FileLocker.Core.Crypto;
 using FileLocker.Core.FolderPackaging;
 using FileLocker.Core.History;
 using FileLocker.Core.Models;
@@ -169,7 +171,65 @@ public sealed class VaultProtocolHandlers
             .Where(Directory.Exists)
             .Sum(path => FolderArchiver.FindNestedLockedFiles(path).Count));
 
-    public SettingsResponse GetSettings() => new(_settings.VaultPath, _settings.Language, _settings.Theme);
+    public SettingsResponse GetSettings() => new(_settings.VaultPath, _settings.Language, _settings.Theme, IsCriticalActionConfigured);
+
+    /// <summary>「關鍵操作」目前是否已經設定過 Windows Hello 驗證——不綁定任何特定加密項目，
+    /// 目前唯一的呼叫端是「使用紀錄」頁的清除功能，之後如果有其他破壞性動作要加同樣的門檻，
+    /// 可以直接重用這裡跟下面兩個方法，不用重新設計一遍。</summary>
+    public bool IsCriticalActionConfigured => !string.IsNullOrEmpty(_settings.CriticalActionCredentialName);
+
+    /// <summary>設定（或重新設定，ReplaceExisting 讓重複呼叫可以直接覆蓋舊憑證）「關鍵操作」驗證用的
+    /// Windows Hello 憑證。</summary>
+    public async Task<bool> SetupCriticalActionAsync(IntPtr ownerWindowHandle)
+    {
+        var credentialName = PasskeyProtector.GenerateCredentialName();
+        var created = await PasskeyProtector.CreateCredentialAsync(credentialName, ownerWindowHandle);
+        if (!created)
+        {
+            return false;
+        }
+
+        _settings.CriticalActionCredentialName = credentialName;
+        _settingsManager.Save(_settings);
+        return true;
+    }
+
+    /// <summary>驗證使用者能通過 Windows Hello 挑戰簽章——回傳 true/false，呼叫端不需要知道細節
+    /// （沒設定過／使用者取消／驗證失敗，統一當作「這次沒通過」），跟 PasskeyProtector 既有的
+    /// 個別項目解鎖走同一套「不區分失敗原因」慣例。</summary>
+    public async Task<bool> VerifyCriticalActionAsync(IntPtr ownerWindowHandle)
+    {
+        if (_settings.CriticalActionCredentialName is not { } credentialName)
+        {
+            return false;
+        }
+
+        var challenge = PasskeyProtector.GenerateChallenge();
+        var signature = await PasskeyProtector.SignChallengeAsync(credentialName, challenge, ownerWindowHandle);
+        if (signature is null)
+        {
+            return false;
+        }
+
+        CryptographicOperations.ZeroMemory(signature);
+        return true;
+    }
+
+    public void ClearHistory() => _historyLogger.ClearAll();
+
+    /// <summary>停用「關鍵操作」驗證：呼叫端（HandleDisableCriticalActionRequestAsync）必須先呼叫過
+    /// VerifyCriticalActionAsync 並確認成功，這裡本身不重複驗證。清掉設定值之外，也把底層 Windows Hello
+    /// 憑證一併刪除，避免留下孤兒憑證。</summary>
+    public async Task DisableCriticalActionAsync()
+    {
+        if (_settings.CriticalActionCredentialName is { } credentialName)
+        {
+            await PasskeyProtector.DeleteCredentialAsync(credentialName);
+        }
+
+        _settings.CriticalActionCredentialName = null;
+        _settingsManager.Save(_settings);
+    }
 
     public UpdateSettingResponse UpdateSetting(string key, string value)
     {

@@ -89,7 +89,7 @@ function dismissToast(id) {
 // 只適合真正的二選一、而且「取消」單純代表不做任何事的情境。永久刪除用在密碼驗證
 // 通過之後（見 verifyPasswordForDeleteResult）：密碼驗證負責證明「這個人真的知道密碼」，
 // 這裡負責「使用者真的要做這個不可逆的動作」的最後一道確認，兩件事分開確認。
-const confirmDialogState = ref(null) // { message, confirmLabel, cancelLabel, variant, resolve }
+const confirmDialogState = ref(null) // { message, confirmLabel, cancelLabel, variant, confirmIconUrl, resolve }
 function askConfirm(message, options = {}) {
   return new Promise((resolve) => {
     confirmDialogState.value = {
@@ -97,6 +97,9 @@ function askConfirm(message, options = {}) {
       confirmLabel: options.confirmLabel || t('confirmDialog.defaultConfirm'),
       cancelLabel: options.cancelLabel || t('passwordPrompt.cancel'),
       variant: options.variant || 'default',
+      // 目前只有「刪除所有使用紀錄」這個確認鍵同時是「觸發 Windows Hello 驗證」的按鈕，
+      // 才需要在確定鍵前面帶一個 icon 表明按下去會做什麼；其餘呼叫端不帶這個選項就跟以前一樣。
+      confirmIconUrl: options.confirmIconUrl || null,
       resolve
     }
   })
@@ -214,6 +217,9 @@ function closeWindow() {
 const settingsVaultPath = ref('')
 const settingsLanguage = ref('zh-TW')
 const settingsTheme = ref('light')
+// 「關鍵操作」的 Windows Hello 驗證是否已經設定過——目前唯一用途是「清除所有使用紀錄」，
+// 見 requestClearHistory。
+const settingsCriticalActionConfigured = ref(false)
 
 // 主題按鈕的圖示要跟著目前的主題換黑白版本——淺色背景配黑色線條、深色背景配白色線條，
 // 不是照哪顆按鈕決定，是照「畫面現在是亮色還是深色」決定，兩顆按鈕的圖示會一起切換。
@@ -732,6 +738,28 @@ const messageHandlers = {
     settingsLanguage.value = data.language
     currentLocale.value = data.language
     settingsTheme.value = data.theme
+    settingsCriticalActionConfigured.value = data.criticalActionConfigured
+  },
+
+  setupCriticalActionResult(data) {
+    resolvePending('setupCriticalActionResult', data)
+  },
+
+  verifyCriticalActionResult(data) {
+    resolvePending('verifyCriticalActionResult', data)
+  },
+
+  clearHistoryResult(data) {
+    if (data.success) {
+      historyItems.value = []
+      showToast(t('history.cleared'), 'success')
+    } else {
+      showToast(t('history.clearFailed'))
+    }
+  },
+
+  disableCriticalActionResult(data) {
+    resolvePending('disableCriticalActionResult', data)
   },
 
   changeVaultPathResult(data) {
@@ -744,7 +772,10 @@ const messageHandlers = {
     }
   },
 
-  updateSettingResult() {
+  updateSettingResult(data) {
+    // 主題切換時畫面本身就會立刻變色，是使用者用眼睛就看得出來的變更，不需要額外文字提示；
+    // 語言等其他設定沒有這種即時可見的回饋，維持原本提示。
+    if (data.key === 'theme') return
     settingsSaveMessage.value = t('settings.saved')
     setTimeout(() => { settingsSaveMessage.value = '' }, 2000)
   },
@@ -853,6 +884,42 @@ function refreshHistory() {
   sendMessage('listHistory')
 }
 
+// 三個步驟，缺一不可：①先問「真的要刪嗎」，確定鍵本身就是「用 Passkey 驗證身份」的觸發鍵——
+// ②按下去才真的觸發 Windows Hello 挑戰簽章；③驗證通過後再問一次「真的要刪嗎」，這一步不用
+// Passkey icon（身份已經驗證過了，這裡純粹是不可逆動作的最後提醒）。跟既有的刪除加密項目流程
+// 一樣，身份驗證跟破壞性意圖確認分開問，不合併成一步。
+async function requestClearHistory() {
+  if (!settingsCriticalActionConfigured.value) {
+    showToast(t('history.clearNeedsSetupFirst'))
+    return
+  }
+
+  const wantsToVerify = await askConfirm(t('confirm.clearHistoryPrompt'), {
+    confirmLabel: t('history.verifyWithPasskey'),
+    confirmIconUrl: passkeyWhiteUrl,
+    variant: 'danger'
+  })
+  if (!wantsToVerify) {
+    return
+  }
+
+  const verifyResult = await requestMessage('verifyCriticalAction', 'verifyCriticalActionResult')
+  if (!verifyResult.success) {
+    showToast(t('history.clearVerificationFailed'))
+    return
+  }
+
+  const finalConfirmed = await askConfirm(t('confirm.clearHistoryFinalWarning'), {
+    confirmLabel: t('history.clearAll'),
+    variant: 'danger'
+  })
+  if (!finalConfirmed) {
+    return
+  }
+
+  sendMessage('clearHistory')
+}
+
 function pickFile() {
   sendMessage('pickFile', { purpose: 'encryptPath' })
 }
@@ -886,7 +953,17 @@ function handleFileDrop(event) {
   window.chrome.webview.postMessageWithAdditionalObjects({ type: 'filesDroppedFromWebView' }, files)
 }
 
-function pickVaultFolder() {
+// 有設定過「關鍵操作驗證」才需要先過一次 Windows Hello，沒設定過就直接跳資料夾選擇器，
+// 維持原本的行為。選在開啟資料夾選擇器之前擋，而不是選完資料夾之後才驗證，避免使用者
+// 選好資料夾、等了一下才被擋下來的落差感。
+async function pickVaultFolder() {
+  if (settingsCriticalActionConfigured.value) {
+    const verifyResult = await requestMessage('verifyCriticalAction', 'verifyCriticalActionResult')
+    if (!verifyResult.success) {
+      showToast(t('settings.vaultMoveVerificationFailed'))
+      return
+    }
+  }
   sendMessage('pickVaultFolder')
 }
 
@@ -899,6 +976,43 @@ function setLanguage(value) {
 function setTheme(value) {
   settingsTheme.value = value
   sendMessage('updateSetting', { key: 'theme', value })
+}
+
+// 設定（或重新設定）「關鍵操作」用的 Windows Hello 驗證——目前用於清除所有使用紀錄前的
+// 身份驗證，以及（設定過才會生效）搬移 Vault 位置前的驗證。重複呼叫會直接覆蓋舊憑證（見
+// 後端 PasskeyProtector.CreateCredentialAsync 的 ReplaceExisting），前端不需要區分
+// 「第一次設定」跟「重新設定」，同一個按鈕、同一個函式。
+async function setupCriticalAction() {
+  const result = await requestMessage('setupCriticalAction', 'setupCriticalActionResult')
+  if (result.success) {
+    settingsCriticalActionConfigured.value = true
+    showToast(t('settings.criticalActionSetupSuccess'), 'success')
+  } else {
+    showToast(t('settings.criticalActionSetupFailed'))
+  }
+}
+
+// 停用「關鍵操作」驗證：先要求通過一次 Windows Hello（證明還是本人在操作），驗證通過後
+// 再問一次是否確定停用，通過才真的清掉設定值跟底層憑證。跟清除紀錄那套「確定鍵＝驗證
+// 觸發鍵」的三步驟不同——停用本身沒有清除紀錄那樣的不可逆風險，驗證通過後單純問一次
+// 「真的要停用嗎」即可。
+async function disableCriticalAction() {
+  const verifyResult = await requestMessage('verifyCriticalAction', 'verifyCriticalActionResult')
+  if (!verifyResult.success) {
+    showToast(t('settings.criticalActionDisableVerificationFailed'))
+    return
+  }
+  const confirmed = await askConfirm(t('confirm.disableCriticalActionPrompt'), {
+    confirmLabel: t('settings.criticalActionDisableButton'),
+    variant: 'danger'
+  })
+  if (!confirmed) return
+
+  const result = await requestMessage('disableCriticalAction', 'disableCriticalActionResult')
+  if (result.success) {
+    settingsCriticalActionConfigured.value = false
+    showToast(t('settings.criticalActionDisabled'), 'success')
+  }
 }
 
 function pickLockedFile() {
@@ -1295,7 +1409,7 @@ function historyDetailText(entry) {
               </div>
             </div>
 
-            <button class="button button--primary" @click="encryptStepDirection = 'forward'; encryptStep = 2" :disabled="encryptPaths.length === 0">
+            <button class="button button--primary" @click="encryptStepDirection = 'forward'; encryptStep = 2; encryptItemResults = []" :disabled="encryptPaths.length === 0">
               {{ t('encrypt.next') }}
             </button>
           </div>
@@ -1638,9 +1752,14 @@ function historyDetailText(entry) {
           </div>
 
           <div v-else>
-            <button class="button button--secondary refresh-button" @click="refreshHistory" :disabled="isLoadingHistory">
-              {{ isLoadingHistory ? t('list.loading') : t('list.refresh') }}
-            </button>
+            <div class="history-toolbar">
+              <button class="button button--secondary refresh-button" @click="refreshHistory" :disabled="isLoadingHistory">
+                {{ isLoadingHistory ? t('list.loading') : t('list.refresh') }}
+              </button>
+              <button class="button button--danger refresh-button" @click="requestClearHistory" type="button" :disabled="historyItems.length === 0">
+                {{ t('history.clearAll') }}
+              </button>
+            </div>
               <div v-if="!isLoadingHistory && historyItems.length === 0" class="empty-state-block">
             <svg class="empty-state-block__icon" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.6"/><path d="M12 7.5V12l3 2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
             <p class="empty-state-block__text">{{ t('list.noHistory') }}</p>
@@ -1741,6 +1860,23 @@ function historyDetailText(entry) {
           </section>
 
           <section class="settings-section">
+            <h3 class="settings-section__title">{{ t('settings.criticalActionTitle') }}</h3>
+            <p class="hint-text">{{ t('settings.criticalActionDescription') }}</p>
+            <p class="status-message" :class="settingsCriticalActionConfigured ? 'status-message--success' : ''">
+              {{ settingsCriticalActionConfigured ? t('settings.criticalActionConfigured') : t('settings.criticalActionNotConfigured') }}
+            </p>
+            <div class="button-row">
+              <button class="button button--secondary" @click="setupCriticalAction" type="button">
+                <img :src="passkeyIconUrl" alt="" class="button__icon" />
+                {{ settingsCriticalActionConfigured ? t('settings.criticalActionResetupButton') : t('settings.criticalActionSetupButton') }}
+              </button>
+              <button v-if="settingsCriticalActionConfigured" class="button button--danger" @click="disableCriticalAction" type="button">
+                {{ t('settings.criticalActionDisableButton') }}
+              </button>
+            </div>
+          </section>
+
+          <section class="settings-section">
             <h3 class="settings-section__title">{{ t('settings.helpTitle') }}</h3>
             <button class="button button--secondary" @click="isHelpOpen = true" type="button">{{ t('settings.helpButton') }}</button>
           </section>
@@ -1775,6 +1911,7 @@ function historyDetailText(entry) {
               @click="resolveConfirmDialog(true)"
               type="button"
             >
+              <img v-if="confirmDialogState.confirmIconUrl" :src="confirmDialogState.confirmIconUrl" alt="" class="button__icon" />
               {{ confirmDialogState.confirmLabel }}
             </button>
           </div>
@@ -1820,6 +1957,10 @@ function historyDetailText(entry) {
             <section class="modal--help__section">
               <h3>{{ t('help.precautionsTitle') }}</h3>
               <p>{{ t('help.precautionsBody') }}</p>
+            </section>
+            <section class="modal--help__section">
+              <h3>{{ t('help.criticalActionTitle') }}</h3>
+              <p>{{ t('help.criticalActionBody') }}</p>
             </section>
           </div>
           <div class="modal__footer modal__footer--center">
@@ -2861,6 +3002,12 @@ textarea.text-input {
 
 .refresh-button {
   margin-bottom: 1rem;
+}
+
+.history-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
 }
 
 .update-banner {

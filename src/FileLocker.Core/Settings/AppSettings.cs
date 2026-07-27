@@ -14,4 +14,8 @@ public class AppSettings
 
     /// <summary>light 或 dark。目前只存偏好、按鈕看得到，實際套用畫面主題要等 GUI 美化階段才會真的生效。</summary>
     public string Theme { get; set; } = "light";
+
+    /// <summary>null 代表使用者還沒設定過「關鍵操作」的 Windows Hello 驗證，見
+    /// VaultProtocolHandlers.SetupCriticalActionAsync／VerifyCriticalActionAsync。</summary>
+    public string? CriticalActionCredentialName { get; set; }
 }
