@@ -88,6 +88,22 @@ static std::wstring GetFileLockerAppPath()
     return L"";
 }
 
+/// <summary>
+/// 依系統 UI 語言決定選單文字：用 GetUserDefaultUILanguage（Explorer 本身顯示語言）而不是
+/// GetSystemDefaultUILanguage（系統安裝語言，可能跟目前登入使用者顯示的語言不同）——
+/// 這裡只需要跟使用者「看到的」Explorer 介面語言一致。App 目前只支援中／英兩種語言，
+/// 非中文一律回退英文，不需要額外判斷其他語系。
+/// </summary>
+static bool IsSystemUiChinese()
+{
+    return PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_CHINESE;
+}
+
+static const wchar_t* GetContextMenuLabel()
+{
+    return IsSystemUiChinese() ? L"使用 FileLocker 加密" : L"Encrypt with FileLocker";
+}
+
 // ---- 這一版加上 IShellExtInit（接收使用者選了哪些檔案）跟 IContextMenu（顯示選單、處理點擊）----
 class FileLockerShellExtClass : public IShellExtInit, public IContextMenu
 {
@@ -177,7 +193,7 @@ public:
             return MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_NULL, 0);
         }
 
-        InsertMenuW(hMenu, indexMenu, MF_BYPOSITION | MF_STRING, idCmdFirst, L"使用 FileLocker 加密");
+        InsertMenuW(hMenu, indexMenu, MF_BYPOSITION | MF_STRING, idCmdFirst, GetContextMenuLabel());
 
         // 回傳值代表我們加了幾個命令 id（這裡只加了一個），Explorer 靠這個數字知道下一個外掛可以從哪個 id 開始用。
         return MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_NULL, 1);
@@ -276,7 +292,10 @@ public:
     {
         if (uFlags == GCS_HELPTEXTW)
         {
-            StringCchCopyW(reinterpret_cast<LPWSTR>(pszName), cchMax, L"用 FileLocker 加密選取的項目");
+            const wchar_t* helpText = IsSystemUiChinese()
+                ? L"用 FileLocker 加密選取的項目"
+                : L"Encrypt the selected items with FileLocker";
+            StringCchCopyW(reinterpret_cast<LPWSTR>(pszName), cchMax, helpText);
             return S_OK;
         }
         return E_NOTIMPL;

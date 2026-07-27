@@ -1,0 +1,181 @@
+<div align="center">
+  <img src="src/FileLocker.Web/src/assets/Locked_Wax_Seal.svg" width="72" alt="FileLocker icon" />
+
+  # FileLocker
+
+  Windows 檔案／資料夾加密工具 — Password · Passkey · Recovery Key
+  三種互相獨立的解鎖方式，密碼永不外流。
+
+  [繁體中文](#繁體中文) · [English](#english)
+</div>
+
+---
+
+> **開發說明／Development note**：本專案開發過程中使用 AI 輔助工具（Claude Code）協助程式撰寫、重構與文件整理，所有程式碼經過人工審查與測試。
+> This project was developed with AI-assisted tooling (Claude Code) for coding, refactoring, and documentation, with all code human-reviewed and tested.
+
+---
+
+## 繁體中文
+
+### 這是什麼
+
+在檔案總管選取檔案或資料夾，右鍵一鍵加密：內容會被移到集中管理的 Vault，原位置只留下一個 `.locked` 指標檔。雙擊指標檔，或在 App 裡操作，輸入密碼（也可以用 Windows Hello Passkey，或事先存好的恢復金鑰）即可還原回原本位置。
+
+- **Argon2id + AES-256-GCM**：密碼經 Argon2id 衍生金鑰，內容用 AES-256-GCM 串流分塊加密，加密大型資料夾也不需要把整份明文塞進記憶體。
+- **三種互相獨立的解鎖方式**：密碼（必要）、Passkey（Windows Hello，裝置綁定）、恢復金鑰（一次性顯示的備援代碼）。
+- **右鍵選單批次加密**：一次選取多個檔案/資料夾，右鍵直接加密；CLI 也支援批次加密／解密／刪除。
+- **Vault 可指向雲端同步資料夾**：把 Vault 位置指到 OneDrive／Dropbox／Google Drive 的本機同步資料夾，同步軟體只會看到密文，達到零知識的跨裝置備份效果。
+- **繁體中文／英文雙語介面**。
+
+### 技術棧
+
+| 層 | 技術 |
+|---|---|
+| 後端 | C# / .NET 10（`FileLocker.Core` 獨立函式庫 + `FileLocker.App` WPF 宿主）|
+| 前端 | Vue 3（Composition API）+ Vite，透過 WebView2 呈現 |
+| Shell Extension | C++ COM `IContextMenu`，負責右鍵選單與多選路徑轉交 |
+| 加密演算法 | Argon2id 金鑰衍生 + AES-256-GCM |
+
+完整架構、加密流程、IPC 協定等細節見 [`FileLocker_技術規格文件.md`](FileLocker_技術規格文件.md)。
+
+### 螢幕截圖
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/encrypt.png" alt="加密頁籤" /><p align="center">加密</p></td>
+    <td width="50%"><img src="docs/screenshots/decrypt.png" alt="解密頁籤" /><p align="center">解密</p></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/vault-list.png" alt="已加密清單" /><p align="center">已加密清單</p></td>
+    <td width="50%"><img src="docs/screenshots/settings.png" alt="設定頁" /><p align="center">設定</p></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/context-menu.png" alt="右鍵選單" /><p align="center">檔案總管右鍵選單</p></td>
+    <td width="50%"><img src="docs/screenshots/recovery-key.png" alt="恢復金鑰彈窗" /><p align="center">恢復金鑰顯示彈窗</p></td>
+  </tr>
+</table>
+
+
+### 建置與執行
+
+```bash
+# 後端測試
+dotnet test
+
+# 前端開發伺服器（Debug 建置會連到 http://localhost:5173）
+cd src/FileLocker.Web
+npm run dev
+
+# 另開一個終端機，跟 npm run dev 同時跑
+dotnet run --project src/FileLocker.App
+
+# Shell Extension 編譯（VS Developer Command Prompt）
+cl /LD /EHsc /utf-8 dllmain.cpp /Fe:FileLockerShellExtension.dll /link /DEF:FileLockerShellExtension.def
+```
+
+### 專案結構
+
+```
+FileLocker/
+├── src/
+│   ├── FileLocker.Core/          # 核心邏輯（加解密、Vault、Metadata、安全機制）
+│   ├── FileLocker.App/           # WPF 宿主（視窗、WebView2、單一執行個體、拖放）
+│   ├── FileLocker.Cli/           # CLI
+│   ├── FileLocker.Web/           # Vue 3 + Vite 前端
+│   └── FileLocker.ShellExtension/# C++ COM Shell Extension
+└── tests/FileLocker.Core.Tests/  # xUnit 測試
+```
+
+### 已知限制
+
+- 尚無正式安裝程式與數位簽章（技術路線已定案，見規格文件第 19 節）。
+- 雲端同步情境的跨裝置人工實測尚待進行。
+- 密碼遺失無法復原，沒有任何後門機制。
+
+### 授權
+
+[MIT License](LICENSE)
+
+---
+
+## English
+
+### What is this
+
+Select files or folders in File Explorer, right-click to encrypt: contents move into a centrally managed Vault, leaving only a `.locked` marker file in the original location. Double-click the marker (or use the app) and enter your password — or unlock with a Windows Hello passkey, or a pre-saved recovery key — to restore it back in place.
+
+- **Argon2id + AES-256-GCM**: passwords are stretched with Argon2id; content is encrypted with chunked, streaming AES-256-GCM, so even large folders never need to sit fully in memory.
+- **Three independent unlock methods**: password (required), passkey (Windows Hello, device-bound), and a one-time-shown recovery key.
+- **Batch encryption from the context menu**: select multiple files/folders and encrypt in one right-click; the CLI supports batch encrypt/unlock/delete too.
+- **Point the Vault at a cloud-synced folder**: OneDrive/Dropbox/Google Drive only ever see ciphertext — zero-knowledge cross-device backup, powered by whatever sync client you already use.
+- **Bilingual UI**: Traditional Chinese and English.
+
+### Tech stack
+
+| Layer | Technology |
+|---|---|
+| Backend | C# / .NET 10 (`FileLocker.Core` standalone library + `FileLocker.App` WPF host) |
+| Frontend | Vue 3 (Composition API) + Vite, rendered via WebView2 |
+| Shell Extension | C++ COM `IContextMenu`, handles the right-click menu and multi-select path handoff |
+| Cryptography | Argon2id key derivation + AES-256-GCM |
+
+Full architecture, encryption flow, and IPC protocol details live in [`FileLocker_技術規格文件.md`](FileLocker_技術規格文件.md) (Traditional Chinese).
+
+### Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/encrypt.png" alt="Encrypt tab" /><p align="center">Encrypt</p></td>
+    <td width="50%"><img src="docs/screenshots/decrypt.png" alt="Decrypt tab" /><p align="center">Decrypt</p></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/vault-list.png" alt="Vault list" /><p align="center">Vault list</p></td>
+    <td width="50%"><img src="docs/screenshots/settings.png" alt="Settings tab" /><p align="center">Settings</p></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/context-menu.png" alt="Explorer context menu" /><p align="center">Explorer context menu</p></td>
+    <td width="50%"><img src="docs/screenshots/recovery-key.png" alt="Recovery key modal" /><p align="center">Recovery key reveal</p></td>
+  </tr>
+</table>
+
+
+### Build & run
+
+```bash
+# Backend tests
+dotnet test
+
+# Frontend dev server (Debug build points to http://localhost:5173)
+cd src/FileLocker.Web
+npm run dev
+
+# In a second terminal, run alongside npm run dev
+dotnet run --project src/FileLocker.App
+
+# Shell Extension build (VS Developer Command Prompt)
+cl /LD /EHsc /utf-8 dllmain.cpp /Fe:FileLockerShellExtension.dll /link /DEF:FileLockerShellExtension.def
+```
+
+### Project layout
+
+```
+FileLocker/
+├── src/
+│   ├── FileLocker.Core/          # Core logic: crypto, Vault, metadata, security
+│   ├── FileLocker.App/           # WPF host (window, WebView2, single instance, drag & drop)
+│   ├── FileLocker.Cli/           # CLI
+│   ├── FileLocker.Web/           # Vue 3 + Vite frontend
+│   └── FileLocker.ShellExtension/# C++ COM Shell Extension
+└── tests/FileLocker.Core.Tests/  # xUnit tests
+```
+
+### Known limitations
+
+- No installer or code signing yet (technical direction decided, see spec §19).
+- Manual cross-device testing of cloud-sync scenarios is still pending.
+- A lost password cannot be recovered — there is no backdoor.
+
+### License
+
+[MIT License](LICENSE)
