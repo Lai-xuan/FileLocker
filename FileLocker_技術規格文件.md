@@ -1,12 +1,15 @@
 # FileLocker 技術規格文件
 
-版本：v3.0（完整重寫，涵蓋加密演算法細節、Passkey／恢復金鑰／關鍵操作驗證機制、前後端 IPC 協定全表、CLI 批次操作等先前未收錄或已過時的內容）| 最後更新：2026-07-27
+版本：v3.1（併入資料夾防護 Folder Guard、軟體更新檢查兩項全新功能，安裝程式打包已完成可用，`.locked` 副檔名關聯與圖示改由安裝程式設定檔處理，見第 19、22、23 節）| 最後更新：2026-08-01
 
 ---
 
 ## 1. 專案總覽
 
-**目標**：Windows 檔案加密工具。使用者在檔案總管選取檔案或資料夾，右鍵加密，加密後內容集中存放在管理區（Vault），原位置留下一個 `.locked` 指標檔。雙擊指標檔或在 App 裡操作，輸入密碼（或用 Passkey、恢復金鑰）即可還原到原位置或指定位置。
+**目標**：Windows 檔案／資料夾保護工具，提供兩種互相獨立、安全等級不同的保護機制（見 [`CONTEXT.md`](CONTEXT.md) 完整術語表）：
+
+- **加密**：使用者在檔案總管選取檔案或資料夾，右鍵加密，加密後內容集中存放在管理區（Vault），原位置留下一個 `.locked` 指標檔。雙擊指標檔或在 App 裡操作，輸入密碼（或用 Passkey、恢復金鑰）即可還原到原位置或指定位置。這是系統既有、最強的保護等級。
+- **資料夾防護（Folder Guard）**：純粹透過 Windows ACL 拒絕目前帳號的存取權來限制資料夾，不加密內容、資料夾原地保留不搬動。刻意接受的較弱保護等級，防的是「隨手瀏覽」，不是「蓄意繞過權限」——見第 22 節。
 
 **技術選型**：C#/.NET 10 後端 + WebView2（Vue 3 + Vite）前端 + C++ Shell Extension。理由：Registry/COM 這塊逃不掉底層要碰 Windows API，把它壓縮成一個獨立、輕量的 Shell Extension 元件；其餘商業邏輯、資料庫存取、加密全部用 C#（生態成熟、除錯工具好），不需要在多種語言之間切換心智負擔；前端用 HTML/CSS/JS 可以最大化調整空間，樣式想改就改 CSS，不受 XAML 的樣板限制。
 
@@ -22,6 +25,8 @@
 9. 「關鍵操作驗證」機制：清除使用紀錄等破壞性操作可設定 Windows Hello 驗證門檻
 10. 介面設計參考 Apple HIG 與 emilkowalski/skills 的動效細節做法
 11. 支援繁體中文／英文雙語，前端文案與後端常見錯誤情境皆有對應翻譯
+12. 資料夾防護（Folder Guard）：獨立分頁，右鍵直接上鎖/解鎖資料夾，共用密碼＋選配 Passkey，純 ACL 限制不加密內容（見第 22 節）
+13. 設定頁可一鍵檢查軟體更新，直接下載並啟動安裝程式（見第 23 節）
 
 ---
 
@@ -481,7 +486,10 @@ Task<VerifyPasswordResult> VerifyPasswordAsync(string uuid, string password)
 
 **拖放檔案支援**：不透過 WPF 層級的原生拖放（同一種 airspace 問題，WebView2 的原生子視窗會把整個拖放操作攔死）。JS 端接住 HTML5 `drop` 事件，用 `chrome.webview.postMessageWithAdditionalObjects` 把 `File` 物件連同訊息送到 C# 端，C# 收到 `CoreWebView2File`，讀 `.Path` 屬性拿到真正磁碟路徑（一般網頁的 `File` 物件拿不到真正路徑，這是 WebView2 專門為原生桌面 App 開的口子）。拖放進來的路徑合併進加密頁籤現有清單（去重複），不是整份取代。
 
-**單一執行個體**：第二個執行個體啟動時把收到的路徑轉交給既有執行個體（`MainWindow.ApplyIncomingPaths`），既有視窗 `Activate()`＋還原最小化＋送出 `initialPaths` 訊息。
+**單一執行個體**：`App.xaml.cs` 用具名 `Mutex` 判斷是否為第一個執行個體；第二個（含右鍵動作、雙擊 `.locked` 檔案等各種再次啟動情境）一律只把命令列參數透過 Named Pipe 轉交給既有執行個體（`HandleLaunchArgs`／`MainWindow.ApplyIncomingPaths`）後自己結束，不開任何視窗。有兩個曾經修過的坑：
+
+- **釋放不屬於自己的 Mutex 會讓轉送行程崩潰**：第二個執行個體從未真正持有這個 Mutex（`Mutex(true, ...)` 的 `initiallyOwned` 只有在真的建立新 Mutex 時才生效），`OnExit` 若無條件呼叫 `ReleaseMutex()` 會在轉送完參數、正要結束的瞬間丟出未處理例外把整個轉送行程弄崩潰——外部看起來就是「右鍵動作完全沒反應」。現在用一個欄位（`_ownsSingleInstanceMutex`，只有真正的第一個執行個體才是 `true`）判斷要不要釋放。
+- **背景執行個體搶不到前景焦點**：既有視窗 `Activate()` 內部就是呼叫 Win32 `SetForegroundWindow`，但 Windows 有「防止搶焦點」機制——呼叫端行程如果不是目前的前景行程，這個 API 會被系統直接忽略，畫面上完全沒反應。負責轉送參數的第二個執行個體是 Explorer 因為使用者剛剛的滑鼠點擊直接產生的，本身握有前景權限，轉送完參數後呼叫 `AllowSetForegroundWindow(ASFW_ANY)` 把這個權限短暫開放出來，第一個執行個體接下來呼叫的 `Activate()` 才能真的把視窗搶到最上面。
 
 **開發／正式環境切換**：`#if DEBUG` 導到 `http://localhost:5173/`（Vite 開發伺服器）；Release 用 `SetVirtualHostNameToFolderMapping("filelocker.local", webAppFolder, Deny)` 導到打包進 `webapp/` 資料夾的靜態檔案，網址固定 `https://filelocker.local/index.html`。`NavigationStarting` 有網址白名單檢查，非允許來源一律 `Cancel`；`NewWindowRequested` 一律 `Handled=true`，擋掉所有 `window.open()`／`target="_blank"` 彈出視窗。
 
@@ -537,7 +545,7 @@ Task<VerifyPasswordResult> VerifyPasswordAsync(string uuid, string password)
 
 Passkey／恢復金鑰／主題切換／巢狀鎖定／警示，全部用使用者自製的 SVG 圖示，依目前是亮色還是深色模式，用 Vue computed 自動切換對應的黑/白線條版本（`Passkey_Black/White.svg`、`Recovery_Key_Black/White.svg`、`Light_Mode_Black/White.svg`、`Dark_Mode_Black/White.svg`、`Lock_Light/Dark.svg`、`Warning_Light/Dark.svg`），`Locked_Wax_Seal.svg` 只有單一版本（固定用在恢復金鑰彈窗）。
 
-App 圖示（工作列/Alt+Tab）：純平面白色鑰匙孔圖形 + 黃銅色圓角方塊底，已匯出 `.ico` 多解析度格式並在 `FileLocker.App.csproj` 用 `<ApplicationIcon>` 接進去，已生效。`.locked` 副檔名圖示已設計定案（同樣的黃銅色蠟封鎖頭造型），尚未接進檔案關聯設定，等安裝程式階段（第 18 節）處理。
+App 圖示（工作列/Alt+Tab）：純平面白色鑰匙孔圖形 + 黃銅色圓角方塊底，已匯出 `.ico` 多解析度格式並在 `FileLocker.App.csproj` 用 `<ApplicationIcon>` 接進去，已生效。`.locked` 副檔名圖示（同樣的黃銅色蠟封鎖頭造型）已隨安裝程式接入檔案關聯設定，見第 16.4 節。
 
 ---
 
@@ -589,13 +597,18 @@ C++（`dllmain.cpp`），CLSID `{A1B2C3D4-E5F6-4789-9ABC-DEF012345678}`。實作
 
 這個設計的好處：**安裝程式完全不需要知道任何 COM／regsvr32 相關的事**，只要把編譯好的 `FileLockerShellExtension.dll` 跟 `FileLocker.App.exe` 放在同一個資料夾（一般的「應用程式內容資料夾」功能就夠了）；已經裝過舊版（登錄不完整）的使用者，下次啟動也會自動偵測缺漏並補上，不需要手動重裝。
 
-### 16.4 `.locked` 副檔名關聯（規劃中，見第 19 節）
+### 16.4 `.locked` 副檔名關聯（已完成，由安裝程式設定檔處理）
 
+跟第 16.3 節的右鍵選單（App 自我註冊）不同，`.locked` 副檔名關聯是**安裝當下由安裝程式一次性建立**的機器層級關聯，不是 App 每次啟動自我檢查的東西——這類關聯天生就該在安裝／解除安裝時成對建立/清除，不需要 App 執行期反覆確認。實際做法是在 `installer_config.json`（mac-style-windows-installer 讀取的設定檔）裡宣告：
+
+```json
+{
+    "file_associations": [".locked"],
+    "doc_icon": "doc_icon.ico"
+}
 ```
-HKEY_CLASSES_ROOT\.locked = "FileLocker.LockedFile"
-HKEY_CLASSES_ROOT\FileLocker.LockedFile\shell\open\command
-    (預設) = "\"C:\Program Files\FileLocker\app.exe\" --unlock \"%1\""
-```
+
+安裝程式據此建立標準的副檔名關聯（雙擊 `.locked` 檔案 = 執行 `FileLocker.App.exe`，帶檔案路徑當參數，跟第 4.3 節 `DecryptAsync` 的觸發路徑一致），並把 `doc_icon.ico`（黃銅色蠟封鎖頭造型，見第 14.7 節）設成該副檔名的圖示。
 
 ### 16.5 32/64 位元
 
@@ -626,9 +639,11 @@ HKEY_CLASSES_ROOT\FileLocker.LockedFile\shell\open\command
 
 ## 19. 安裝程式打包
 
-最終編譯完成的 `FileLocker.exe`（含 C# 主程式 + Shell Extension DLL）打包成安裝檔的部分，沿用既有的 **[mac-style-windows-installer](https://github.com/Lai-xuan/mac-style-windows-installer)** 專案。這屬於開發階段規劃的最後一步，順序上會排在所有功能與安全性測試都完成之後。
+**已完成並可用**。最終編譯完成的 `FileLocker.App.exe`（含 C# 主程式 + Shell Extension DLL）打包成安裝檔，沿用既有的 **[mac-style-windows-installer](https://github.com/Lai-xuan/mac-style-windows-installer)** 專案，透過 `installer_config.json` 宣告安裝內容（`app_name`／`main_exe`／`file_associations`／`doc_icon`／`dependencies`／EULA 文字等，見第 16.4 節），不需要另外寫安裝腳本邏輯。
 
-安裝流程需要對接的項目：主程式與 Shell Extension DLL（放同一資料夾即可，見第 16.3 節，不需要安裝程式處理任何登錄邏輯）、`.locked` 副檔名關聯登錄（見第 16.4 節）、`.locked` 圖示的 `.ico` 檔接入（App 圖示已在開發階段接進 `.csproj`，不需要安裝程式另外處理）。安裝流程中需要內建重啟 Explorer 的提示步驟。
+安裝流程已對接的項目：主程式與 Shell Extension DLL（放同一資料夾，見第 16.3 節，安裝程式不需要處理任何 COM 登錄邏輯，App 啟動時自我註冊）、`.locked` 副檔名關聯與圖示（見第 16.4 節，`installer_config.json` 的 `file_associations`／`doc_icon`）、`.NET Desktop Runtime` 相依套件偵測安裝（`dependencies: ["dotnet_desktop"]`）、解除安裝程式（`uninstall.exe`）、安裝清單（`install_manifest.json`，供解除安裝時精確比對要移除哪些檔案）。安裝完成後的資料夾內容即為第 23 節「軟體更新檢查」下載回來的更新包會覆蓋的同一份結構。
+
+**還沒做的**：CLI（`FileLocker.Cli`）目前不包含在安裝內容裡，見第 21 節。
 
 **沒有數位簽章**：使用者第一次執行安裝檔，Windows SmartScreen 大機率會跳警告，要解決需要另外採購程式碼簽署憑證，這不是安裝程式工具本身能解決的事。這也代表目前完全沒有偵測執行檔本身是否被竄改的機制——數位簽章除了消除 SmartScreen 警告，更重要的作用是讓 Windows 能自動驗證執行檔完整性，這是業界標準做法，但需要外部採購憑證的商業流程。「程式自己在啟動時檢查自身雜湊值」這種做法評估後不採用：攻擊者只要能竄改執行檔內容，同樣能連檢查邏輯本身一起改掉，只能擋住意外損毀、擋不住真正有心的竄改，容易給人錯誤的安全感。
 
@@ -644,24 +659,89 @@ HKEY_CLASSES_ROOT\FileLocker.LockedFile\shell\open\command
 | Metadata 層 | `.meta.json` 讀寫、SQLite 本機快取索引、`FileSystemWatcher` 即時監控 | 完成 |
 | CLI | `--encrypt`／`--unlock`／`--unlock-recovery`／`--list`／`--delete`，支援批次操作（多路徑/uuid）、`FILELOCKER_VAULT_PATH` 環境變數與管線輸入 | 完成（不涵蓋 Passkey，設計上刻意排除） |
 | WebView2 + Vue 3 前端 | 4 個主頁籤、密碼視窗、Vault 位置設定（瀏覽資料夾/搬移）、GUI 視覺美化（無邊框視窗、設計系統、深色模式、拖放檔案、進度條、動效細節）、IPC 協定 | 完成 |
-| Shell Extension（C++ 最小化元件） | 右鍵選單、多選批次支援 | 完成 |
-| Shell Extension 自動註冊 | App 啟動時自我檢查/註冊（`*` + `Directory`），不需安裝程式處理 | 完成 |
-| `.locked` 副檔名關聯 | 註冊腳本 | 待安裝程式階段一併處理 |
-| App／`.locked` 圖示 | 設計定案、匯出 `.ico`、接進專案 | App 圖示已接進 `.csproj` 並生效；`.locked` 圖示待安裝程式階段接入檔案關聯 |
+| Shell Extension（C++ 最小化元件） | 右鍵選單、多選批次支援、資料夾防護上鎖/解鎖兩個命令 id | 完成 |
+| Shell Extension 自動註冊 | App 啟動時自我檢查/註冊（`*` + `Directory` 加密選單、資料夾防護命名空間 CLSID），不需安裝程式處理 | 完成 |
+| `.locked` 副檔名關聯 | 由安裝程式 `installer_config.json` 的 `file_associations` 處理 | 完成 |
+| App／`.locked` 圖示 | 設計定案、匯出 `.ico`、接進專案 | 完成（App 圖示接進 `.csproj`；`.locked` 圖示接進安裝程式 `doc_icon`） |
 | 安全性強化 | 安全清除、密碼鎖定機制、指標檔簽章驗證、Vault ACL 硬化 | 完成並測試 |
 | 密碼小視窗字型 | 內嵌 IBM Plex Sans TC，跟網頁端字型家族一致 | 完成 |
 | 多語言 | 前端靜態文字、後端錯誤代碼（含搬移 Vault／存恢復金鑰失敗訊息） | 完成 |
 | 雲端同步情境測試 | 模擬多裝置同步、衝突情境 | 自動化測試完成；跨裝置人工實測待使用者自行進行 |
-| 打包安裝程式 | 對接 mac-style-windows-installer，含 `.locked` 檔案關聯、圖示接入 | 未開始 |
+| 資料夾防護（Folder Guard） | 純 ACL 資料夾存取限制（不加密）、共用密碼＋選配 Passkey、右鍵上鎖/解鎖、清單頁管理，見第 22 節 | 完成 |
+| 資料夾防護：雙擊已上鎖資料夾直接解鎖 | Shell Namespace Extension（`CLSID2`／`desktop.ini`）技術路線 | 實驗性功能，程式碼保留但預設關閉，見第 22.6 節 |
+| 軟體更新檢查 | 設定頁一鍵檢查 GitHub Release、下載安裝檔並啟動，見第 23 節 | 完成 |
+| 打包安裝程式 | 對接 mac-style-windows-installer，含 `.locked` 檔案關聯、圖示接入 | 完成，見第 19 節 |
 
 ---
 
 ## 21. 已知限制與待辦事項（非缺陷，是刻意取捨或尚未進行的工作）
 
 - CLI 不涵蓋 Passkey（設計決定，見第 15 節），未來若要支援應為獨立指令。
-- 正式安裝程式尚未開始，技術路線已定案（沿用 mac-style-windows-installer）。
-- `.locked` 副檔名圖示已設計定案，尚未接進安裝程式的檔案關聯設定。
-- 沒有數位簽章，也沒有執行檔完整性驗證機制（詳見第 19 節的評估與取捨）。
+- 沒有數位簽章，也沒有執行檔完整性驗證機制（詳見第 19 節的評估與取捨）；安裝檔與更新下載回來的安裝檔執行時，Windows SmartScreen 可能會跳出警告。
 - 雲端同步情境僅完成自動化測試，跨裝置的完整人工實測待使用者自行進行。
-- 沒有檢查更新機制（尚未開始）：等正式安裝程式的散布方式定案後再設計，更新流程通常跟安裝程式格式（MSI/MSIX）綁在一起，現在做容易白工。
 - 安裝包目前只打算納入 GUI（`FileLocker.App`），CLI（`FileLocker.Cli`）尚未一起發布：兩者是獨立的建置產物，`FileLocker.App.csproj` 沒有引用 CLI 專案，Release 輸出資料夾裡不會自動有 `FileLocker.Cli.exe`。之後如果要一併發布，需要另外 `dotnet build src/FileLocker.Cli -c Release`，把輸出複製進安裝內容資料夾，並在安裝程式裡把該路徑加入系統 PATH（CLI 是設計給終端機/腳本用的，不加 PATH 使用上很不方便；GUI 本身不需要加 PATH）。
+- 軟體更新檢查僅支援透過正式安裝版（含 `installer_config.json`）比對版本，需要能連上 `api.github.com`；直接以原始碼執行的開發版不會顯示版本資訊（見第 23 節）。
+- 資料夾防護的「雙擊已上鎖資料夾直接解鎖」是實驗性功能，預設關閉、程式碼保留但不再繼續開發測試——實測曾經在特定情境下造成 `explorer.exe` 整個行程死結（需要重開機才能解除），詳見第 22.6 節，這是刻意暫緩、不是遺漏。
+
+---
+
+## 22. 資料夾防護（Folder Guard）
+
+獨立於「加密」之外的第二種保護機制：**不加密內容**，純粹透過 Windows ACL 拒絕目前登入帳號對某資料夾的存取權，資料夾原地保留、不搬動、不需要提權。定位是「防隨手瀏覽」，不是「防蓄意繞過」——完整的威脅模型與機制取捨推理見 [`docs/adr/0001-folder-guard-deny-acl-not-ownership-transfer.md`](docs/adr/0001-folder-guard-deny-acl-not-ownership-transfer.md)；設計訪談的原始逐項紀錄見 [`FileLocker_資料夾防護_功能規劃.md`](FileLocker_資料夾防護_功能規劃.md)（規劃文件，現已實作完成，本節是併入後的目前狀態說明）。
+
+跟「加密」分頁刻意保持語彙區隔：加密用「加密／解密」，資料夾防護用「上鎖／解鎖」，兩邊動詞互不共用，避免使用者混淆兩種保護等級的差異。
+
+### 22.1 憑證模型
+
+- **整個功能共用一組密碼＋選配 Passkey**（`FolderGuardService`），不是每個資料夾各自一組。第一次上鎖任何資料夾前，強制先完成這組共用憑證的設定。
+- 密碼必填、Passkey 選配，密碼永遠是保底解鎖手段——這個功能沒有像加密那樣的「恢復金鑰」可以兜底，不能讓 Passkey 變成唯一解鎖方式。
+- 密碼錯誤鎖定套用跟加密一樣的機制（`LockoutTracker`，連續錯 5 次、指數退避最長 1 小時），但鍵值是固定代表整個功能的常數鍵，不是逐項目 UUID——鎖定會影響「所有」正在上鎖的資料夾，這是刻意接受的取捨。Passkey 略過鎖定機制，理由同第 6.4 節。
+- 忘記密碼、Passkey 也失效時，仍可透過檔案總管「內容→安全性→進階」拿回資料夾存取權——這不是加密，沒有無法復原的風險，設定頁會主動告知這件事。
+
+### 22.2 ACL 機制
+
+`FolderGuardAcl.ApplyDeny`/`RemoveDeny`：對目前登入帳號的 SID 加上（或移除）一條拒絕 `ReadAndExecute | Write | Delete`（`FileSystemRights` 組合值 `0x301BF`，剛好等於 .NET `FileSystemRights.Modify`）、`ContainerInherit | ObjectInherit` 繼承旗標的 ACE。不處理父層列舉權限、不搭配隱藏屬性——資料夾在檔案總管裡看得到，雙擊進去才會被拒絕（Windows 原生「存取被拒」錯誤視窗，不攔截、不替換成自訂畫面）。拒絕 `Delete` 權限連帶擋住重新命名（NTFS 底下重新命名一個物件需要對該物件本身的 `Delete` 權限）。
+
+**明確 ACE 永遠優先於繼承 ACE**：這條規則本身是資料夾上一條「明確」的 Deny，會繼承給資料夾內所有既有與新增的子項目。`FolderGuardNamespaceMarker`（見第 22.6 節）需要讓 `desktop.ini` 在套用 Deny 之後仍然可讀，做法是在套用 Deny **之前**，先於 `desktop.ini` 本身加一條明確的 Allow ACE——之後資料夾的繼承 Deny 傳播到這個既有檔案時，會被這條已存在的明確 Allow 蓋過去（Windows ACL 規則：不論 Allow 或 Deny，明確規則永遠比繼承規則優先）。
+
+ACL 拒絕規則掛在目前登入帳號的 SID 上，FileLocker App 自己的行程也是用同一個帳號跑，**加密流程讀取被上鎖的資料夾時一樣會被拒絕存取**，不只是使用者在檔案總管點不進去而已（見第 22.5 節）。
+
+### 22.3 Shell Extension 整合
+
+`FileLockerShellExtension.dll`（`dllmain.cpp`）在原本「使用 FileLocker 加密」選單項目之外，多插入第二個命令 id（`idCmdFirst + 1`），依 `IsFolderGuardLocked` 現場查詢的 ACL 狀態決定要顯示「將所選資料夾上鎖」還是「將所選資料夾解鎖」：
+
+- `IsFolderGuardLocked`：用 `GetNamedSecurityInfoW` 讀取目前的 DACL，逐條比對是否有一條 `ACCESS_DENIED_ACE`、SID 等於目前使用者、且 `Mask` 包含 `kFolderGuardDeniedRights`（`0x301BF`，必須跟 `FolderGuardAcl.cs` 的 C# 端算出來的值完全一致，兩邊各自獨立判斷，任何一邊改了遮罩值另一邊沒跟著改，選單就會永久誤判）。
+- 「上鎖」/「解鎖」選單項目只在選取的項目**全部是資料夾**時才出現，混到任何一個檔案就整個不顯示（不做「自動忽略檔案只鎖資料夾」這種隱性行為）；選取範圍內鎖定狀態不一致（`Mixed`：有些鎖有些沒鎖）時，兩個都不顯示，避免使用者搞不清楚這次點下去的動作。
+- `InvokeCommand` 依命令 id 組出 `--folder-guard-lock` 或 `--folder-guard-unlock` 命令列旗標啟動 `FileLocker.App.exe`，跟現有「直接傳路徑＝加密」預設行為區隔開（見 `App.xaml.cs` `HandleLaunchArgs`）。
+- 支援多選批次：因為憑證是共用一組，批次上鎖/解鎖不需要處理加密批次的複雜度（第 4.5 節那種「多選時 Passkey 勾選框鎖住」的問題），純粹對每個選取的資料夾各自套用同一組 ACL 規則。
+
+### 22.4 上鎖／解鎖互動
+
+- **右鍵「上鎖」**：已設定過共用密碼時，直接跳出原生 WPF 小視窗（`FolderGuardConfirmLockWindow`，技術上比照 `PasswordPromptWindow`，不透過 WebView2）確認「你要將『OO』上鎖嗎？」，**上鎖本身不需要輸入密碼**（密碼只用來驗證解鎖身份，不是上鎖的必要條件），確認彈窗本身已足夠防止手滑誤觸。尚未設定過共用密碼則改為開啟主程式、跳到「資料夾防護」分頁引導完成首次設定，設定完成後才真的上鎖這次選取的資料夾。
+- **右鍵「解鎖」**：跳出 `FolderGuardUnlockPromptWindow`，有設定 Passkey 就優先跳 Windows Hello 驗證，使用者把驗證視窗關掉才退回密碼輸入畫面（比照第 14.4 節 `PasswordPromptWindow` 遇到 Passkey 項目時的既有互動模式）。右鍵一定顯示「解鎖」代表已經是鎖定狀態，不會有「還沒設定過」要導去首次設定的分支。
+- **分頁內清單頁操作**：獨立分頁管理所有上鎖中的資料夾，可個別解鎖、一次全部解鎖（`UnlockAllAsync`）；已解鎖項目可「前往資料夾」直接開啟總管，或「再次上鎖」恢復保護。健壯性檢查：清單頁載入時針對索引裡每個路徑即時檢查 ACL 是否真的有對應的拒絕規則，不符合就視為「已不在防護中」，比照 `VaultManager.ScanAll()`「以磁碟實際狀態為準，索引只是加速用途」的既有設計原則。
+
+### 22.5 與加密流程的互動
+
+`LockService` 建構時透過委派 `getGuardedFolderPaths` 得知目前哪些資料夾正在防護中（見 `App.xaml.cs`），加密流程一開始掃描到選取範圍內含正在上鎖的資料夾，會先跳出彈窗列出被擋的子資料夾清單，要求先解鎖才能繼續（驗證方式同第 22.4 節），不會讓加密流程半途讀取 ACL 拒絕的資料夾而失敗。已解鎖並被加密流程消耗（打包進外層 zip）的資料夾，在資料夾防護索引裡對應的項目也會一併清除。
+
+### 22.6 實驗性功能：雙擊已上鎖資料夾直接解鎖（預設關閉）
+
+`AppSettings`／`FolderGuardData` 的 `DoubleClickUnlockEnabled`（預設 `false`）控制的選配功能：雙擊一個已上鎖的資料夾，不看到 Windows 原生「存取被拒」畫面，而是直接跳出解鎖確認彈窗。技術路線是 Windows Shell Namespace Extension：
+
+- `FolderGuardNamespaceMarker.Apply`/`Remove`（C#）在上鎖/解鎖時貼上/撕下標記——寫入 `desktop.ini`（`[.ShellClassInfo]` 段落同時寫 `CLSID=` 與 `CLSID2=` 兩個鍵；`CLSID2` 才是 Windows Vista 之後的 Explorer 用來做完整 `IShellFolder` 綁定的鍵，舊式的 `CLSID=` 單獨存在時現代 Explorer 不會拿它做完整綁定），並依 Explorer 對「desktop.ini 客製化資料夾」的長年慣例把資料夾本身設成 `System | ReadOnly` 屬性（`ReadOnly` 在資料夾身上被借用做「有客製化設定要讀 desktop.ini」的標記，不是真的唯讀語意）。
+- `folderguard_namespace.cpp`／`folderguard_namespace.h`：獨立的 COM `IShellFolder` 實作（`FolderGuardNamespaceFolder`），CLSID `{2A4376E0-C5FC-4126-8ACD-9FC8AA377AC1}`，跟右鍵選單的 `FileLockerShellExtClass` 是完全不同的 COM 類別，由同一個 `FileLockerShellExtension.dll` 匯出。`GetAttributesOf` 需要回報 `SFGAO_FOLDER | SFGAO_FILESYSTEM | SFGAO_FILESYSANCESTOR`（一般檔案系統資料夾都會同時回報這三個旗標），只回報 `SFGAO_FOLDER` 會讓 Explorer 把它當成不可操作的抽象項目，雙擊完全沒有反應。
+- `ShellExtensionRegistrar.RegisterNamespaceShellFolder`：CLSID 底下額外的 `ShellFolder` 子機碼（`Attributes` DWORD 值需要跟上面的 `GetAttributesOf` 回傳值一致）是 Explorer 判斷「這個 CLSID 是命名空間資料夾」的必要登記，跟右鍵選單的 `ContextMenuHandlers` 登記完全獨立。
+
+**維持預設關閉、不再繼續開發測試的原因**：這個技術路線在實測中曾經讓 `explorer.exe` 整個行程進入無法從任何權限層級（包含使用者自己互動式提權的 PowerShell）終止的死結狀態，只能靠重開機解除——用 Process Monitor 追蹤確認 Explorer 對命名空間 CLSID 的解析序列本身正常，但命名空間物件被雙擊觸發之後的某個環節導致行程整個卡死，這是一個系統層級的穩定性風險，跟「防隨手瀏覽」這個功能定位要求的可靠度不成比例。程式碼保留在專案裡（`DoubleClickUnlockEnabled` 預設 `false`，不影響現有右鍵上鎖/解鎖功能），但除非之後有新的證據或不同的技術路線，不建議重新開啟並繼續投入測試資源。
+
+---
+
+## 23. 軟體更新檢查
+
+設定頁一鍵檢查是否有新版本（`MainWindow.xaml.cs` 的 `HandleCheckForUpdatesRequestAsync`）：
+
+- **版本比對來源**：只讀取安裝內容資料夾裡的 `installer_config.json`（`FetchLatestGitHubReleaseAsync` 呼叫 `https://api.github.com/repos/Lai-xuan/FileLocker/releases/latest` 取得最新 Tag／說明／下載連結，跟本機 `installer_config.json` 裡的版本號比較）——這個檔案是 mac-style-windows-installer 安裝時才會放進安裝資料夾的（見第 19 節），直接以原始碼執行（`dotnet run`）的開發環境找不到這個檔案，不會顯示版本資訊，也不算錯誤情境。
+- 發現新版本會自動跳出彈窗，內容是 GitHub Release 說明的 Markdown 渲染結果（獨立可捲動框框，避免長篇說明撐爆版面）。
+- 確認更新後直接下載安裝檔並啟動安裝程式；**安裝程式確認成功啟動後才關閉 FileLocker 本體**，避免「先關自己、安裝程式卻沒真的啟動」導致使用者以為在更新、實際上什麼都沒發生，也避免安裝時本體檔案還被鎖住導致覆蓋失敗。
+- 需要能連上 `api.github.com`；沒有網路或請求失敗只當作「這次沒查到更新」，不當成錯誤彈窗打斷使用者。

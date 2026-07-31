@@ -7,98 +7,24 @@
 #include <new>
 #include <vector>
 #include <string>
+#include "shell_extension_common.h"
+#include "folderguard_namespace.h"
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "user32.lib")
 
-// FileLocker Shell Extension 的 CLSID，這個專案專屬的識別碼，跟其他程式不會撞。
+// FileLocker Shell Extension（右鍵選單）的 CLSID，這個專案專屬的識別碼，跟其他程式不會撞。
 // {A1B2C3D4-E5F6-4789-9ABC-DEF012345678}
 static const CLSID CLSID_FileLockerShellExtension =
 { 0xA1B2C3D4, 0xE5F6, 0x4789, { 0x9A, 0xBC, 0xDE, 0xF0, 0x12, 0x34, 0x56, 0x78 } };
 
-static LONG g_cDllRef = 0;
-static HMODULE g_hModule = nullptr;
-
-/// <summary>
-/// 正確處理 Windows 命令列參數的引號逃脫，比照微軟官方文件的標準演算法——
-/// 單純用「路徑前後各包一個雙引號」在路徑結尾剛好是奇數個反斜線時會出錯（那個反斜線會
-/// 逃脫掉我們補上去的關閉引號，導致這個參數沒有真的結束、後面的參數解析全部跟著錯亂）。
-/// NTFS 檔名本身不能包含雙引號，但這裡還是做完整處理，不只賭「檔名不會有問題字元」。
-/// </summary>
-static std::wstring QuoteArgument(const std::wstring& argument)
-{
-    std::wstring result = L"\"";
-    for (auto it = argument.begin(); ; ++it)
-    {
-        unsigned backslashes = 0;
-        while (it != argument.end() && *it == L'\\')
-        {
-            ++it;
-            ++backslashes;
-        }
-
-        if (it == argument.end())
-        {
-            // 結尾的反斜線後面接的是我們要補上的關閉引號，反斜線數量要翻倍，
-            // 不然會被解析成「逃脫掉關閉引號」，這個參數就不會真的結束。
-            result.append(backslashes * 2, L'\\');
-            break;
-        }
-        else if (*it == L'"')
-        {
-            result.append(backslashes * 2 + 1, L'\\');
-            result.push_back(L'"');
-        }
-        else
-        {
-            result.append(backslashes, L'\\');
-            result.push_back(*it);
-        }
-    }
-    result.push_back(L'"');
-    return result;
-}
-
-/// <summary>
-/// 找 FileLocker.App.exe 在哪裡：跟這個 Shell Extension DLL 放在同一個資料夾——
-/// 正式安裝後兩者會被安裝程式放在同一個「應用程式內容資料夾」裡（見規格文件第 5.2、13 節），
-/// 開發階段用 regsvr32 手動註冊測試時，也是先手動把編譯出來的 DLL 複製到跟 FileLocker.App.exe
-/// 同一個資料夾（見 FileLocker.App.csproj 的 CopyShellExtensionDll Target），所以這一條路徑
-/// 涵蓋開發與正式兩種情境，不需要另外寫死本機開發路徑當備援（那個路徑只在特定一台機器上有效，
-/// 而且會把開發機的資料夾結構打包進正式發行的 DLL 裡，沒必要）。
-/// </summary>
-static std::wstring GetFileLockerAppPath()
-{
-    wchar_t modulePath[MAX_PATH];
-    GetModuleFileNameW(g_hModule, modulePath, ARRAYSIZE(modulePath));
-    std::wstring dllDir = modulePath;
-    size_t pos = dllDir.find_last_of(L"\\/");
-    if (pos != std::wstring::npos)
-    {
-        dllDir = dllDir.substr(0, pos + 1);
-    }
-
-    std::wstring candidate = dllDir + L"FileLocker.App.exe";
-    if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
-    {
-        return candidate;
-    }
-
-    return L"";
-}
-
-/// <summary>
-/// 依系統 UI 語言決定選單文字：用 GetUserDefaultUILanguage（Explorer 本身顯示語言）而不是
-/// GetSystemDefaultUILanguage（系統安裝語言，可能跟目前登入使用者顯示的語言不同）——
-/// 這裡只需要跟使用者「看到的」Explorer 介面語言一致。App 目前只支援中／英兩種語言，
-/// 非中文一律回退英文，不需要額外判斷其他語系。
-/// </summary>
-static bool IsSystemUiChinese()
-{
-    return PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_CHINESE;
-}
+// 兩個都不能用 static——folderguard_namespace.cpp 也需要讀寫這兩個全域變數（見
+// shell_extension_common.h 的 extern 宣告），static 會限制成只有這個編譯單元看得到，
+// 跨檔連結會找不到符號。
+LONG g_cDllRef = 0;
+HMODULE g_hModule = nullptr;
 
 static const wchar_t* GetContextMenuLabel()
 {
@@ -121,8 +47,9 @@ static const wchar_t* GetUnlockFolderMenuLabel()
 
 // 跟 FolderGuardAcl.cs 的 DeniedRights（FileSystemRights.ReadAndExecute | Write | Delete）保持一致——
 // 兩邊各自獨立判斷「這個資料夾是不是被資料夾防護鎖定」，用同一組位元遮罩才不會誤判。
-// ReadAndExecute(0x200A9) | Write(0x116) | Delete(0x10000) = 0x210BF。
-static const DWORD kFolderGuardDeniedRights = 0x000210BFUL;
+// ReadAndExecute(0x200A9) | Write(0x116) | Delete(0x10000) = 0x301BF
+// （這個組合值剛好等於 .NET FileSystemRights.Modify）。
+static const DWORD kFolderGuardDeniedRights = 0x000301BFUL;
 
 /// <summary>
 /// 查目前使用者的 SID 在這個資料夾上是不是有一條符合的 Deny ACE，邏輯對應
@@ -575,20 +502,26 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv)
 {
     *ppv = nullptr;
-    if (!IsEqualCLSID(rclsid, CLSID_FileLockerShellExtension))
+
+    if (IsEqualCLSID(rclsid, CLSID_FileLockerShellExtension))
     {
-        return CLASS_E_CLASSNOTAVAILABLE;
+        auto* pFactory = new (std::nothrow) FileLockerClassFactory();
+        if (pFactory == nullptr)
+        {
+            return E_OUTOFMEMORY;
+        }
+
+        HRESULT hr = pFactory->QueryInterface(riid, ppv);
+        pFactory->Release();
+        return hr;
     }
 
-    auto* pFactory = new (std::nothrow) FileLockerClassFactory();
-    if (pFactory == nullptr)
+    if (IsEqualCLSID(rclsid, CLSID_FolderGuardNamespaceFolder))
     {
-        return E_OUTOFMEMORY;
+        return CreateFolderGuardNamespaceClassFactory(riid, ppv);
     }
 
-    HRESULT hr = pFactory->QueryInterface(riid, ppv);
-    pFactory->Release();
-    return hr;
+    return CLASS_E_CLASSNOTAVAILABLE;
 }
 
 STDAPI DllCanUnloadNow()

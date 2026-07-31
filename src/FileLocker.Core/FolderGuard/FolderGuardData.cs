@@ -27,5 +27,11 @@ public class FolderGuardData
     public string? PasswordVerificationHashBase64 { get; set; }
     public bool PasskeyEnabled { get; set; }
     public string? PasskeyCredentialName { get; set; }
+
+    /// <summary>設定頁選配開關（預設關閉）：開啟後，鎖定資料夾時會額外貼上 desktop.ini 命名空間
+    /// 標記，讓雙擊該資料夾直接跳出解鎖視窗（見 FolderGuardNamespaceMarker）——這條路徑跑在
+    /// explorer.exe 行程裡面，風險跟純右鍵選單擴充不同，所以刻意做成選配、預設關閉。</summary>
+    public bool DoubleClickUnlockEnabled { get; set; }
+
     public List<FolderGuardEntry> Entries { get; set; } = new();
 }

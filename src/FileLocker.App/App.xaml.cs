@@ -1,6 +1,7 @@
 ﻿using System.IO;
 using System.IO.Pipes;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -22,6 +23,9 @@ public partial class App : Application
     private const string PipeName = "FileLocker-SingleInstance-Pipe";
 
     private Mutex? _singleInstanceMutex;
+
+    // OnExit 判斷要不要釋放 Mutex 用——只有真正拿到所有權的（第一個）行程可以釋放，見 OnExit 的說明。
+    private bool _ownsSingleInstanceMutex;
 
     // 這些欄位是給 HandleLaunchArgs 用的——不管是這次啟動本身要處理的參數，
     // 還是之後透過 Named Pipe 收到、從其他行程轉送過來的參數，都走同一套邏輯，
@@ -46,10 +50,17 @@ public partial class App : Application
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
         _singleInstanceMutex = new Mutex(true, MutexName, out var isFirstInstance);
+        _ownsSingleInstanceMutex = isFirstInstance;
 
         if (!isFirstInstance)
         {
             // 已經有一個實體在跑了：把這次的命令列參數轉送過去，自己不開任何視窗，直接結束。
+            // 注意：這個行程從來沒有真正拿到 Mutex 的所有權（Mutex(true, ...) 的 initiallyOwned
+            // 只有在「真的建立了新的 Mutex」時才會生效，這裡 isFirstInstance 是 false，代表
+            // Mutex 早就存在、所有權在另一個行程手上）——OnExit 之後一定不能對這個 Mutex
+            // 呼叫 ReleaseMutex，否則會因為「釋放一個自己沒有持有的鎖」丟出未處理例外，
+            // 讓這個原本只是負責轉送參數、馬上要結束的行程整個當掉（曾經是右鍵「上鎖」在背景已
+            // 開啟時完全沒反應的真正原因：每次右鍵動作都會讓這個轉送行程立刻崩潰）。
             TryForwardArgsToRunningInstance(e.Args);
             Shutdown();
             return;
@@ -131,7 +142,14 @@ public partial class App : Application
     {
         _vaultChangeWatcher?.Dispose();
         _vaultIndexCache?.Dispose();
-        _singleInstanceMutex?.ReleaseMutex();
+
+        // 只有真正拿到所有權的第一個行程才能釋放——被 Mutex 擋下來、只負責轉送參數就結束的
+        // 行程從來沒有持有過它，呼叫 ReleaseMutex 會丟出 ApplicationException（釋放一個自己
+        // 沒有持有的鎖），見 OnStartup 的說明。
+        if (_ownsSingleInstanceMutex)
+        {
+            _singleInstanceMutex?.ReleaseMutex();
+        }
         _singleInstanceMutex?.Dispose();
         base.OnExit(e);
     }
@@ -221,6 +239,9 @@ public partial class App : Application
             });
         confirmWindow.Closed += (_, _) => ShutdownIfNoWindowsRemain();
         confirmWindow.Show();
+        // 這次動作很可能是背景執行個體透過 Named Pipe 收到轉送過來的（見 StartPipeServerListener），
+        // 單純 Show() 不保證能把視窗搶到前景——比照 MainWindow.ApplyIncomingPaths 補上 Activate()。
+        confirmWindow.Activate();
     }
 
     private void HandleFolderGuardUnlockLaunch(List<string> paths)
@@ -233,6 +254,7 @@ public partial class App : Application
         var unlockWindow = new FolderGuardUnlockPromptWindow(paths, _folderGuardService!, _settings!.Theme);
         unlockWindow.Closed += (_, _) => ShutdownIfNoWindowsRemain();
         unlockWindow.Show();
+        unlockWindow.Activate();
     }
 
     /// <summary>HandleLaunchArgs 裡兩個「需要開一個全新 MainWindow」的分支共用：一般加密路徑、
@@ -312,12 +334,27 @@ public partial class App : Application
 
                     var forwardedArgs = JsonSerializer.Deserialize<string[]>(json) ?? Array.Empty<string>();
 
-                    Dispatcher.Invoke(() => HandleLaunchArgs(forwardedArgs));
+                    // HandleLaunchArgs 丟例外要讓使用者看得到——之前整個 try 區塊共用同一個
+                    // 靜默吞例外的 catch，導致「右鍵動作轉送過來、但視窗建立過程出錯」這種情況
+                    // 完全沒有任何回饋，使用者只會覺得「什麼都沒發生」，沒辦法回報是哪裡壞了。
+                    // Pipe 連線本身（等待連線、讀取資料）失敗是預期內、可以安靜重試的情境，
+                    // 跟這裡分開處理。
+                    try
+                    {
+                        Dispatcher.Invoke(() => HandleLaunchArgs(forwardedArgs));
+                    }
+                    catch (Exception ex)
+                    {
+                        Dispatcher.Invoke(() => MessageBox.Show(
+                            $"處理右鍵動作時發生錯誤：\n{ex}",
+                            "FileLocker", MessageBoxButton.OK, MessageBoxImage.Error));
+                    }
                 }
                 catch (Exception)
                 {
                     // 這個背景監聽迴圈本身不能因為單次連線失敗就整個停掉（沒有 GUI 可以顯示錯誤），
-                    // 吞掉繼續等下一次連線，最壞情況只是那一次轉送沒有成功。
+                    // 吞掉繼續等下一次連線，最壞情況只是那一次轉送沒有成功。這裡只涵蓋 Pipe 連線/
+                    // 讀取本身的失敗，不包含上面 HandleLaunchArgs 的例外（那個已經另外處理過了）。
                 }
             }
         });
@@ -337,6 +374,14 @@ public partial class App : Application
             using var writer = new StreamWriter(client, Encoding.UTF8);
             writer.Write(JsonSerializer.Serialize(args));
             writer.Flush();
+
+            // Windows 有「防止搶焦點」機制：背景中的舊行程（沒有前景權限）呼叫 Window.Activate()
+            // 內部其實是呼叫 SetForegroundWindow，但那個 API 在呼叫端行程不是目前前景行程時
+            // 會被系統直接忽略——單純補上 Activate() 沒辦法讓背景執行個體真的把視窗搶到最上面。
+            // 這個轉送行程是 Explorer 因為使用者剛剛的右鍵點擊直接產生的，本身握有前景權限，
+            // 可以呼叫 AllowSetForegroundWindow(ASFW_ANY) 把這個權限短暫開放給任何行程，讓舊行程
+            // 接下來呼叫的 Activate() 真的能生效，而不是被系統悄悄擋下、看起來完全沒反應。
+            AllowSetForegroundWindow(AsfwAny);
         }
         catch (Exception)
         {
@@ -344,4 +389,13 @@ public partial class App : Application
             // 這次操作沒反應，比意外開出第二個視窗互相打架更容易處理／不會造成資料風險。
         }
     }
+
+    // ASFW_ANY：傳給 AllowSetForegroundWindow 代表「任何行程」，不用另外把目標行程的 PID
+    // 透過 Pipe 傳回來比對——反正這個權限只維持到下一次使用者輸入為止，開放給任何行程用
+    // 不會有安全疑慮（見 Win32 文件：AllowSetForegroundWindow 的效果在使用者下一次操作
+    // 滑鼠／鍵盤時就會自動失效）。
+    private const int AsfwAny = -1;
+
+    [DllImport("user32.dll")]
+    private static extern bool AllowSetForegroundWindow(int dwProcessId);
 }

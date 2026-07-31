@@ -72,4 +72,21 @@
     </ItemGroup>
   </Target>
 
+  <!--
+    同樣的道理：CopyWebAppForRelease 在 Build 階段把 dist/ 複製進 $(OutDir)webapp/，dotnet publish
+    一樣不會自動把它帶進 publish/ 資料夾——執行期 MainWindow 靠 SetVirtualHostNameToFolderMapping
+    指向這個資料夾載入前端畫面，找不到就會跳出「找不到前端畫面檔案」的錯誤視窗。跟 Shell Extension
+    DLL 同一招，直接從來源 dist/ 登記 ResolvedFileToPublish，RelativePath 保留 webapp/ 底下的
+    原始資料夾結構（%(RecursiveDir)）。
+  -->
+  <Target Name="AddWebAppToPublishOutput" BeforeTargets="ComputeFilesToPublish" Condition="'$(Configuration)' == 'Release' AND Exists('..\FileLocker.Web\dist')">
+    <ItemGroup>
+      <WebAppFilesForPublish Include="..\FileLocker.Web\dist\**\*.*" />
+      <ResolvedFileToPublish Include="@(WebAppFilesForPublish)">
+        <RelativePath>webapp\%(RecursiveDir)%(Filename)%(Extension)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+
 </Project>

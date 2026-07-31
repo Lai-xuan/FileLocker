@@ -384,6 +384,10 @@ public partial class MainWindow : Window
                     await HandleDisableFolderGuardRequestAsync(root);
                     break;
 
+                case "setFolderGuardDoubleClickUnlock":
+                    await HandleSetFolderGuardDoubleClickUnlockRequestAsync(root);
+                    break;
+
                 case "openFolderInExplorer":
                     HandleOpenFolderInExplorer(root);
                     break;
@@ -931,6 +935,7 @@ public partial class MainWindow : Window
             type = "folderGuardListResult",
             configured = _folderGuardService.IsConfigured,
             passkeyEnabled = _folderGuardService.IsPasskeyEnabled,
+            doubleClickUnlockEnabled = _folderGuardService.IsDoubleClickUnlockEnabled,
             items = entries.Select(e => new
             {
                 e.Path,
@@ -938,6 +943,21 @@ public partial class MainWindow : Window
                 e.LockedAtUtc,
                 e.UnlockedAtUtc
             })
+        });
+    }
+
+    /// <summary>設定頁「雙擊已上鎖資料夾直接解鎖」開關——沒有身份驗證要求（跟上鎖一樣，
+    /// 這只是操作體驗開關，不是需要驗證的動作），切換完直接把最新狀態回報給前端更新畫面。</summary>
+    private async Task HandleSetFolderGuardDoubleClickUnlockRequestAsync(JsonElement request)
+    {
+        var enabled = request.GetProperty("enabled").GetBoolean();
+        await _folderGuardService.SetDoubleClickUnlockEnabledAsync(enabled);
+
+        SendToFrontend(new
+        {
+            type = "setFolderGuardDoubleClickUnlockResult",
+            success = true,
+            enabled
         });
     }
 

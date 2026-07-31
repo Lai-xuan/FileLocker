@@ -239,6 +239,8 @@ const isChangingVaultPath = ref(false)
 //各自一組），密碼必填、Passkey 選配，密碼永遠是保底解鎖手段。 ----
 const folderGuardConfigured = ref(false)
 const folderGuardPasskeyEnabled = ref(false)
+const folderGuardDoubleClickUnlockEnabled = ref(false)
+const isTogglingFolderGuardDoubleClickUnlock = ref(false)
 const folderGuardItems = ref([])
 const isLoadingFolderGuard = ref(false)
 const folderGuardSetupPassword = ref('')
@@ -929,6 +931,10 @@ const messageHandlers = {
     resolvePending('disableFolderGuardPasskeyResult', data)
   },
 
+  setFolderGuardDoubleClickUnlockResult(data) {
+    resolvePending('setFolderGuardDoubleClickUnlockResult', data)
+  },
+
   checkForUpdatesResult(data) {
     resolvePending('checkForUpdatesResult', data)
   },
@@ -1063,7 +1069,23 @@ async function refreshFolderGuardList() {
   isLoadingFolderGuard.value = false
   folderGuardConfigured.value = data.configured
   folderGuardPasskeyEnabled.value = data.passkeyEnabled
+  folderGuardDoubleClickUnlockEnabled.value = data.doubleClickUnlockEnabled
   folderGuardItems.value = data.items
+}
+
+// 「雙擊已上鎖資料夾直接解鎖」是實驗性功能（跑在 explorer.exe 行程內的命名空間擴充，見規劃
+// 文件），不需要身份驗證——單純是操作體驗開關，切換失敗也只顯示 toast，不影響其他功能。
+async function toggleFolderGuardDoubleClickUnlockAction(event) {
+  const enabled = event.target.checked
+  isTogglingFolderGuardDoubleClickUnlock.value = true
+  const result = await requestMessage('setFolderGuardDoubleClickUnlock', 'setFolderGuardDoubleClickUnlockResult', { enabled })
+  isTogglingFolderGuardDoubleClickUnlock.value = false
+  if (result.success) {
+    folderGuardDoubleClickUnlockEnabled.value = result.enabled
+  } else {
+    event.target.checked = folderGuardDoubleClickUnlockEnabled.value
+    showToast(t('folderGuard.doubleClickUnlockToggleFailed'))
+  }
 }
 
 async function submitFolderGuardSetup() {
@@ -2460,6 +2482,22 @@ function historyDetailText(entry) {
                 <button class="button button--danger" @click="disableFolderGuardAction" type="button">{{ t('folderGuard.disableButton') }}</button>
               </div>
               <p class="hint-text">{{ t('folderGuard.forgotPasswordHint') }}</p>
+
+              <div class="field" style="margin-top: 16px;">
+                <label class="checkbox-field">
+                  <input
+                    type="checkbox"
+                    :checked="folderGuardDoubleClickUnlockEnabled"
+                    :disabled="isTogglingFolderGuardDoubleClickUnlock"
+                    @change="toggleFolderGuardDoubleClickUnlockAction"
+                  />
+                  <span>{{ t('folderGuard.doubleClickUnlockLabel') }}</span>
+                  <span class="info-tooltip" tabindex="0">
+                    <span class="info-tooltip__icon">i</span>
+                    <span class="info-tooltip__bubble">{{ t('folderGuard.doubleClickUnlockDetail') }}</span>
+                  </span>
+                </label>
+              </div>
             </template>
             <template v-else>
               <p class="hint-text">

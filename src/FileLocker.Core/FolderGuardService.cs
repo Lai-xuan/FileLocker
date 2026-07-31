@@ -34,6 +34,7 @@ public class FolderGuardService
     public bool IsConfigured => _store.Load().PasswordVerificationHashBase64 is not null;
 
     public bool IsPasskeyEnabled => _store.Load().PasskeyEnabled;
+    public bool IsDoubleClickUnlockEnabled => _store.Load().DoubleClickUnlockEnabled;
 
     /// <summary>給 LockService 的巢狀防護檢查用（見 LockService 建構子的 getGuardedFolderPaths 參數）：
     /// 只回傳目前真的在 Locked 狀態、且通過自我修復檢查的路徑。</summary>
@@ -232,6 +233,18 @@ public class FolderGuardService
             return new FolderGuardResult(false, "此資料夾已在防護中", ErrorCode: ErrorCodes.FolderGuardAlreadyLocked);
         }
 
+        // 命名空間標記要在 ACL 生效「之前」貼——Deny 規則套用後，目前使用者（含本程式自己）就
+        // 無法再往資料夾裡寫 desktop.ini 了。標記失敗只影響「雙擊解鎖」這個加分體驗，不能連累
+        // 鎖定本身，所以安靜吞掉例外，不像下面的 ApplyDeny 失敗要整個回報失敗。
+        if (data.DoubleClickUnlockEnabled)
+        {
+            try
+            {
+                FolderGuardNamespaceMarker.Apply(path);
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or IOException) { }
+        }
+
         try
         {
             await Task.Run(() => FolderGuardAcl.ApplyDeny(path));
@@ -292,6 +305,17 @@ public class FolderGuardService
                 ErrorCode: ErrorCodes.FolderGuardAclRemoveFailed, ErrorDetail: ex.Message);
         }
 
+        // 撕標記要在 RemoveDeny 之後（先解除 ACL 才能重新寫入資料夾內容），且不管開關目前是不是
+        // 開的都要嘗試——避免開關中途被關掉、資料夾解鎖後還留著沒清乾淨的 desktop.ini 殘留。
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                FolderGuardNamespaceMarker.Remove(path);
+            }
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException) { }
+
         var data = _store.Load();
         var entry = data.Entries.FirstOrDefault(e => PathsEqual(e.Path, path));
         if (entry is not null)
@@ -350,6 +374,41 @@ public class FolderGuardService
         }
 
         return new FolderGuardUnlockResult(true);
+    }
+
+    /// <summary>設定頁「雙擊已上鎖資料夾直接解鎖」開關切換：對目前清單裡所有 Locked 的項目
+    /// 批次補貼/撕掉命名空間標記，讓開關生效範圍涵蓋「已經鎖著的資料夾」，不是只影響之後新鎖的。
+    /// 個別資料夾標記失敗不中止整批（跟 LockFolderAsync／UnlockFolderCoreAsync 同一個容錯原則），
+    /// 開關本身還是要成功切換並存檔。</summary>
+    public async Task SetDoubleClickUnlockEnabledAsync(bool enabled)
+    {
+        var data = _store.Load();
+        data.DoubleClickUnlockEnabled = enabled;
+        _store.Save(data);
+
+        var lockedPaths = data.Entries
+            .Where(e => e.Status == FolderGuardStatus.Locked)
+            .Select(e => e.Path)
+            .ToList();
+
+        foreach (var path in lockedPaths)
+        {
+            try
+            {
+                await Task.Run(() =>
+                {
+                    if (enabled)
+                    {
+                        FolderGuardNamespaceMarker.Apply(path);
+                    }
+                    else
+                    {
+                        FolderGuardNamespaceMarker.Remove(path);
+                    }
+                });
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or IOException) { }
+        }
     }
 
     /// <summary>加密流程撞到巢狀防護資料夾、使用者確認解鎖後呼叫：解鎖但不留清單記錄

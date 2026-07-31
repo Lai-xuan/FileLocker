@@ -29,7 +29,9 @@
 - **Argon2id + AES-256-GCM**：密碼經 Argon2id 衍生金鑰，內容用 AES-256-GCM 串流分塊加密，加密大型資料夾也不需要把整份明文塞進記憶體。
 - **三種互相獨立的解鎖方式**：密碼（必要）、Passkey（Windows Hello，裝置綁定）、恢復金鑰（一次性顯示的備援代碼）。
 - **右鍵選單批次加密**：一次選取多個檔案/資料夾，右鍵直接加密；CLI 也支援批次加密／解密／刪除。
+- **資料夾防護（Folder Guard）**：獨立於加密之外的第二種保護方式，純粹透過 Windows 存取權限（ACL）限制資料夾，不加密內容——防隨手瀏覽，不防蓄意繞過。右鍵直接上鎖／解鎖，共用密碼＋選配 Passkey。
 - **Vault 可指向雲端同步資料夾**：把 Vault 位置指到 OneDrive／Dropbox／Google Drive 的本機同步資料夾，同步軟體只會看到密文，達到零知識的跨裝置備份效果。
+- **軟體更新檢查**：設定頁一鍵檢查 GitHub 上的新版本，發現更新可直接下載並啟動安裝程式。
 - **繁體中文／英文雙語介面**。
 
 ### 技術棧
@@ -95,6 +97,7 @@ FileLocker/
 
 - 安裝程式尚無數位簽章，執行時可能觸發 Windows SmartScreen 警告（見上方「下載與安裝」與規格文件第 19 節）。
 - 雲端同步情境的跨裝置人工實測尚待進行。
+- 資料夾防護的「雙擊已上鎖資料夾直接解鎖」是實驗性功能，預設關閉（規格文件第 22.6 節）。
 - 密碼遺失無法復原，沒有任何後門機制。
 
 ### 授權
@@ -116,7 +119,9 @@ Grab the latest installer from the [Releases](https://github.com/Lai-xuan/FileLo
 - **Argon2id + AES-256-GCM**: passwords are stretched with Argon2id; content is encrypted with chunked, streaming AES-256-GCM, so even large folders never need to sit fully in memory.
 - **Three independent unlock methods**: password (required), passkey (Windows Hello, device-bound), and a one-time-shown recovery key.
 - **Batch encryption from the context menu**: select multiple files/folders and encrypt in one right-click; the CLI supports batch encrypt/unlock/delete too.
+- **Folder Guard**: a second, separate protection method alongside encryption — restricts a folder purely through Windows access permissions (ACL) without encrypting its contents. Stops casual browsing, not a determined attacker. Lock/unlock directly from the right-click menu, with a shared password and optional passkey.
 - **Point the Vault at a cloud-synced folder**: OneDrive/Dropbox/Google Drive only ever see ciphertext — zero-knowledge cross-device backup, powered by whatever sync client you already use.
+- **Software update check**: check for new releases on GitHub with one click from Settings, then download and launch the installer directly.
 - **Bilingual UI**: Traditional Chinese and English.
 
 ### Tech stack
@@ -182,6 +187,7 @@ FileLocker/
 
 - The installer isn't code-signed yet, which may trigger a Windows SmartScreen warning (see "Download & install" above and spec §19).
 - Manual cross-device testing of cloud-sync scenarios is still pending.
+- Folder Guard's "double-click a locked folder to unlock directly" is an experimental feature, disabled by default (spec §22.6).
 - A lost password cannot be recovered — there is no backdoor.
 
 ### License

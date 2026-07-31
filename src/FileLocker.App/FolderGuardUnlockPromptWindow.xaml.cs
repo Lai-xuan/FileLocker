@@ -53,11 +53,14 @@ public partial class FolderGuardUnlockPromptWindow : Window
 
         Loaded += async (_, _) =>
         {
+            // 兩種模式都先 Activate 一次——這個視窗很可能是背景執行個體透過 Named Pipe 收到
+            // 轉送過來才建立的，不搶一次前景，密碼模式視窗可能被壓在其他視窗底下沒人看到。
+            Activate();
+
             if (_passkeyEnabled)
             {
-                // 跟 PasswordPromptWindow 同樣的理由：先明確 Activate 一次、讓出一輪 Dispatcher，
-                // 確保這個視窗的作用中狀態已經穩定，才觸發 Passkey，避免焦點被搶回去蓋掉驗證視窗。
-                Activate();
+                // 跟 PasswordPromptWindow 同樣的理由：讓出一輪 Dispatcher，確保這個視窗的作用中
+                // 狀態已經穩定，才觸發 Passkey，避免焦點被搶回去蓋掉驗證視窗。
                 await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.Input);
                 await TryPasskeyUnlockAsync();
             }
