@@ -10,9 +10,11 @@ namespace FileLocker.Core.FolderGuard;
 /// </summary>
 public static class FolderGuardNamespaceMarker
 {
-    // 跟 dllmain.cpp／folderguard_namespace.cpp 裡 FolderGuardNamespaceFolder 的 CLSID 保持完全一致，
-    // 這裡改了那邊也要跟著改，兩邊各自獨立寫死同一個值（沒有共用來源，C# 跟 C++ 本來就是分開編譯）。
-    private const string NamespaceClsid = "{2A4376E0-C5FC-4126-8ACD-9FC8AA377AC1}";
+    // 跟 folderguard_namespace.cpp 裡 CLSID_FolderGuardNamespaceFolder 的值保持完全一致，這裡改了
+    // 那邊也要跟著改——C# 跟 C++ 分開編譯，無法共用同一份原始碼定義，這是兩邊唯一無法消除的一份
+    // 硬編值。但 C# 端本身不再各自維護第二份：ShellExtensionRegistrar 改成直接引用這個公開常數，
+    // 而不是像之前一樣自己另外宣告一份字串（C# 內部只有這一處定義）。
+    public const string NamespaceClsid = "{2A4376E0-C5FC-4126-8ACD-9FC8AA377AC1}";
 
     // Windows Vista 之後，完整的命名空間 CLSID 綁定要用 CLSID2，舊式的 CLSID= 只給少數
     // 舊版相容情境用，現代 Explorer（含 Windows 10/11）不會拿它來做完整的 IShellFolder 綁定——

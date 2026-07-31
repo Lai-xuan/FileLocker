@@ -159,11 +159,27 @@ public partial class App : Application
     /// 都走這個方法，行為完全一致——這是「單一執行個體」機制的核心：外部看起來像是
     /// 開了一支新的 FileLocker，實際上都是同一支行程在處理。
     /// </summary>
-    // Shell Extension 右鍵「上鎖」命令列旗標（見 dllmain.cpp InvokeCommand），跟現有的「直接傳路徑
-    // ＝加密」預設行為區隔開——資料夾防護是完全不同的操作，不能讓 Shell Extension 傳來的路徑
-    // 預設被當成要加密的東西。
+    // Shell Extension 右鍵「上鎖」／「解鎖」命令列旗標（見 dllmain.cpp InvokeCommand），跟現有的
+    // 「直接傳路徑＝加密」預設行為區隔開——資料夾防護是完全不同的操作，不能讓 Shell Extension
+    // 傳來的路徑預設被當成要加密的東西。
     private const string FolderGuardLockArgFlag = "--folder-guard-lock";
     private const string FolderGuardUnlockArgFlag = "--folder-guard-unlock";
+
+    /// <summary>
+    /// 「旗標 → 該開哪個資料夾防護進入點」的對應表：之後新增 Folder Guard 命令列旗標，
+    /// 只需要在這裡加一列，不需要去改 HandleLaunchArgs 本身的控制流程。
+    /// </summary>
+    private Dictionary<string, Action<List<string>>>? _folderGuardLaunchHandlers;
+    private Dictionary<string, Action<List<string>>> FolderGuardLaunchHandlers => _folderGuardLaunchHandlers ??= new()
+    {
+        // 右鍵「上鎖」（見規劃文件第 6 節）：已經設定過共用密碼就走瞬間確認的原生小視窗，
+        // 不開主視窗；還沒設定過就退回開主視窗、導引使用者先完成首次設定。
+        [FolderGuardLockArgFlag] = HandleFolderGuardLockLaunch,
+
+        // 右鍵「解鎖」：解鎖一定要驗證身份，不會有「還沒設定過」要導去首次設定的分支——
+        // 右鍵會顯示「解鎖」代表這些資料夾已經是鎖定狀態，資料夾防護一定已經設定過。
+        [FolderGuardUnlockArgFlag] = HandleFolderGuardUnlockLaunch,
+    };
 
     private void HandleLaunchArgs(string[] args)
     {
@@ -177,21 +193,9 @@ public partial class App : Application
             return;
         }
 
-        // 右鍵「上鎖」（見規劃文件第 6 節）：已經設定過共用密碼就走瞬間確認的原生小視窗，
-        // 不開主視窗；還沒設定過就退回開主視窗、導引使用者先完成首次設定。
-        if (args.Length >= 1 && args[0] == FolderGuardLockArgFlag)
+        if (args.Length >= 1 && FolderGuardLaunchHandlers.TryGetValue(args[0], out var folderGuardHandler))
         {
-            var lockPaths = ResolveInitialPaths(args[1..]);
-            HandleFolderGuardLockLaunch(lockPaths);
-            return;
-        }
-
-        // 右鍵「解鎖」：解鎖一定要驗證身份，不會有「還沒設定過」要導去首次設定的分支——
-        // 右鍵會顯示「解鎖」代表這些資料夾已經是鎖定狀態，資料夾防護一定已經設定過。
-        if (args.Length >= 1 && args[0] == FolderGuardUnlockArgFlag)
-        {
-            var unlockPaths = ResolveInitialPaths(args[1..]);
-            HandleFolderGuardUnlockLaunch(unlockPaths);
+            folderGuardHandler(ResolveInitialPaths(args[1..]));
             return;
         }
 

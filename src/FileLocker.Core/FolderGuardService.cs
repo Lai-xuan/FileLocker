@@ -233,21 +233,11 @@ public class FolderGuardService
             return new FolderGuardResult(false, "此資料夾已在防護中", ErrorCode: ErrorCodes.FolderGuardAlreadyLocked);
         }
 
-        // 命名空間標記要在 ACL 生效「之前」貼——Deny 規則套用後，目前使用者（含本程式自己）就
-        // 無法再往資料夾裡寫 desktop.ini 了。標記失敗只影響「雙擊解鎖」這個加分體驗，不能連累
-        // 鎖定本身，所以安靜吞掉例外，不像下面的 ApplyDeny 失敗要整個回報失敗。
-        if (data.DoubleClickUnlockEnabled)
-        {
-            try
-            {
-                FolderGuardNamespaceMarker.Apply(path);
-            }
-            catch (Exception ex) when (ex is UnauthorizedAccessException or IOException) { }
-        }
-
+        // 命名空間標記／ACL 兩件事的順序限制交給 FolderGuardProtection 統一處理，這裡不需要
+        // 知道「哪個要先」——ApplyDeny 失敗要整個回報失敗，標記失敗已經在裡面安靜吞掉了。
         try
         {
-            await Task.Run(() => FolderGuardAcl.ApplyDeny(path));
+            await Task.Run(() => FolderGuardProtection.Apply(path, data.DoubleClickUnlockEnabled));
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
         {
@@ -292,29 +282,17 @@ public class FolderGuardService
     /// 對多個資料夾各自呼叫這個內部方法，不用每個資料夾都重新問一次密碼。</summary>
     private async Task<FolderGuardUnlockResult> UnlockFolderCoreAsync(string path, bool keepInListAsUnlocked)
     {
+        // 命名空間標記／ACL 兩件事的順序限制交給 FolderGuardProtection 統一處理（解鎖方向跟
+        // 上鎖相反：先解 ACL 才能重新寫入資料夾內容，再撕標記），這裡不需要知道「哪個要先」。
         try
         {
-            if (Directory.Exists(path))
-            {
-                await Task.Run(() => FolderGuardAcl.RemoveDeny(path));
-            }
+            await Task.Run(() => FolderGuardProtection.Remove(path));
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
         {
             return new FolderGuardUnlockResult(false, $"解除存取限制失敗：{ex.Message}",
                 ErrorCode: ErrorCodes.FolderGuardAclRemoveFailed, ErrorDetail: ex.Message);
         }
-
-        // 撕標記要在 RemoveDeny 之後（先解除 ACL 才能重新寫入資料夾內容），且不管開關目前是不是
-        // 開的都要嘗試——避免開關中途被關掉、資料夾解鎖後還留著沒清乾淨的 desktop.ini 殘留。
-        try
-        {
-            if (Directory.Exists(path))
-            {
-                FolderGuardNamespaceMarker.Remove(path);
-            }
-        }
-        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException) { }
 
         var data = _store.Load();
         var entry = data.Entries.FirstOrDefault(e => PathsEqual(e.Path, path));

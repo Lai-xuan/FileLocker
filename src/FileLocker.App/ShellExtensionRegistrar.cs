@@ -1,5 +1,6 @@
 using System.IO;
 using System.Security.Cryptography;
+using FileLocker.Core.FolderGuard;
 using Microsoft.Win32;
 
 namespace FileLocker.App;
@@ -20,10 +21,15 @@ internal static class ShellExtensionRegistrar
     private const string ClsidString = "{A1B2C3D4-E5F6-4789-9ABC-DEF012345678}";
     private const string DllFileName = "FileLockerShellExtension.dll";
 
-    // 要跟 folderguard_namespace.cpp 裡的 CLSID_FolderGuardNamespaceFolder、
-    // FolderGuardNamespaceMarker.cs 裡的 NamespaceClsid 保持完全一致——「雙擊已上鎖資料夾
-    // 直接解鎖」這個選配功能用的命名空間擴充，跟右鍵選單是完全獨立的 COM 類別/CLSID。
-    private const string NamespaceClsidString = "{2A4376E0-C5FC-4126-8ACD-9FC8AA377AC1}";
+    // 要跟 folderguard_namespace.cpp 裡的 CLSID_FolderGuardNamespaceFolder 保持完全一致——
+    // 「雙擊已上鎖資料夾直接解鎖」這個選配功能用的命名空間擴充，跟右鍵選單是完全獨立的 COM
+    // 類別/CLSID。值本身定義在 FolderGuardNamespaceMarker.NamespaceClsid（C# 端唯一定義處，
+    // 這裡直接引用，不再像之前一樣自己另外宣告一份字串）。
+    private static string NamespaceClsidString => FolderGuardNamespaceMarker.NamespaceClsid;
+
+    // dllmain.cpp 的 IsFolderGuardLocked 執行期讀這個登錄值，不再自己硬編一份拒絕權限遮罩——
+    // FolderGuardAcl.DeniedRightsMask 才是唯一定義處，見該常數上的說明。
+    private const string FolderGuardDeniedRightsMaskValueName = "FolderGuardDeniedRightsMask";
 
     // SFGAO_FOLDER | SFGAO_FILESYSTEM | SFGAO_FILESYSANCESTOR——要跟 folderguard_namespace.cpp
     // 的 IShellFolder::GetAttributesOf 回傳值保持一致（不含 SFGAO_BROWSABLE／SFGAO_HASSUBFOLDER）。
@@ -58,25 +64,51 @@ internal static class ShellExtensionRegistrar
 
         // 只比對路徑不夠——DLL 有可能原地被重新編譯覆蓋（路徑沒變、內容變了），這種情況也要
         // 判定成「需要重新註冊」，才能正確觸發呼叫端「請重啟 Explorer」的提示（見 App.xaml.cs）。
-        var alreadyRegistered = string.Equals(ReadRegisteredDllPath(ClsidString), dllPath, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(ReadRegisteredDllHash(ClsidString), fileHash, StringComparison.OrdinalIgnoreCase)
-            && IsContextMenuHandlerFullyRegistered()
-            && string.Equals(ReadRegisteredDllPath(NamespaceClsidString), dllPath, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(ReadRegisteredDllHash(NamespaceClsidString), fileHash, StringComparison.OrdinalIgnoreCase)
-            && IsNamespaceShellFolderRegistered();
+        var alreadyRegistered =
+            IsClsidFullyRegistered(ClsidString, dllPath, fileHash, IsContextMenuHandlerFullyRegistered)
+            && IsFolderGuardDeniedRightsMaskCurrent()
+            && IsClsidFullyRegistered(NamespaceClsidString, dllPath, fileHash, IsNamespaceShellFolderRegistered);
 
         if (alreadyRegistered)
         {
             return false; // 已經註冊且指向正確路徑，不需要重做。
         }
 
-        RegisterClsid(ClsidString, dllPath, fileHash);
-        RegisterContextMenuHandler();
+        RegisterClsidAndHandler(ClsidString, dllPath, fileHash, RegisterContextMenuHandler);
+        WriteFolderGuardDeniedRightsMask();
 
-        RegisterClsid(NamespaceClsidString, dllPath, fileHash);
-        RegisterNamespaceShellFolder();
+        RegisterClsidAndHandler(NamespaceClsidString, dllPath, fileHash, RegisterNamespaceShellFolder);
 
         return true;
+    }
+
+    /// <summary>
+    /// 右鍵選單、命名空間資料夾這兩組 CLSID 註冊本質相同（寫入 InprocServer32 + 各自一組
+    /// 「掛勾」子機碼），共用同一個「這組 CLSID 是否已完整註冊」判斷，兩邊只是各自的掛勾驗證
+    /// 邏輯（<paramref name="isHandlerRegistered"/>）不同——不需要各自維護一份平行的判斷式。
+    /// </summary>
+    private static bool IsClsidFullyRegistered(string clsidString, string dllPath, string fileHash, Func<bool> isHandlerRegistered)
+        => string.Equals(ReadRegisteredDllPath(clsidString), dllPath, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(ReadRegisteredDllHash(clsidString), fileHash, StringComparison.OrdinalIgnoreCase)
+            && isHandlerRegistered();
+
+    /// <summary>對稱於 <see cref="IsClsidFullyRegistered"/>：註冊 CLSID 本身，再執行各自的掛勾註冊。</summary>
+    private static void RegisterClsidAndHandler(string clsidString, string dllPath, string fileHash, Action registerHandler)
+    {
+        RegisterClsid(clsidString, dllPath, fileHash);
+        registerHandler();
+    }
+
+    private static void WriteFolderGuardDeniedRightsMask()
+    {
+        using var key = Registry.CurrentUser.CreateSubKey($@"Software\Classes\CLSID\{ClsidString}\InprocServer32");
+        key.SetValue(FolderGuardDeniedRightsMaskValueName, FolderGuardAcl.DeniedRightsMask, RegistryValueKind.DWord);
+    }
+
+    private static bool IsFolderGuardDeniedRightsMaskCurrent()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey($@"Software\Classes\CLSID\{ClsidString}\InprocServer32");
+        return key?.GetValue(FolderGuardDeniedRightsMaskValueName) is int value && value == FolderGuardAcl.DeniedRightsMask;
     }
 
     private static string? ReadRegisteredDllPath(string clsidString)

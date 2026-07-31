@@ -45,11 +45,31 @@ static const wchar_t* GetUnlockFolderMenuLabel()
     return IsSystemUiChinese() ? L"將所選資料夾解鎖" : L"Unlock Selected Folders";
 }
 
-// 跟 FolderGuardAcl.cs 的 DeniedRights（FileSystemRights.ReadAndExecute | Write | Delete）保持一致——
-// 兩邊各自獨立判斷「這個資料夾是不是被資料夾防護鎖定」，用同一組位元遮罩才不會誤判。
-// ReadAndExecute(0x200A9) | Write(0x116) | Delete(0x10000) = 0x301BF
-// （這個組合值剛好等於 .NET FileSystemRights.Modify）。
-static const DWORD kFolderGuardDeniedRights = 0x000301BFUL;
+/// <summary>
+/// 執行期讀取 ShellExtensionRegistrar.cs 寫入的拒絕權限遮罩——FolderGuardAcl.cs 的
+/// DeniedRightsMask 才是唯一定義處，這裡不再手動維護第二份數值（這正是曾經修過的一個 bug
+/// 的成因：兩份各自手寫的數值曾經對不上，選單永遠判斷成「未鎖定」，解鎖選項永遠不會出現）。
+/// 讀不到登錄值時才退回這個寫死的備援值，只在 App 從未啟動過一次、Shell Extension 卻已經
+/// 被外部工具註冊這種極端情況才用得到——正常情況下 App 每次啟動都會透過
+/// ShellExtensionRegistrar.EnsureRegistered() 寫入這個值，這裡幾乎不會真的走到備援分支。
+/// </summary>
+static DWORD GetFolderGuardDeniedRightsMask()
+{
+    // ReadAndExecute(0x200A9) | Write(0x116) | Delete(0x10000) = 0x301BF
+    // （這個組合值剛好等於 .NET FileSystemRights.Modify）。
+    constexpr DWORD kFallbackDeniedRights = 0x000301BFUL;
+
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    LSTATUS status = RegGetValueW(
+        HKEY_CURRENT_USER,
+        L"Software\\Classes\\CLSID\\{A1B2C3D4-E5F6-4789-9ABC-DEF012345678}\\InprocServer32",
+        L"FolderGuardDeniedRightsMask",
+        RRF_RT_REG_DWORD,
+        nullptr, &value, &size);
+
+    return (status == ERROR_SUCCESS) ? value : kFallbackDeniedRights;
+}
 
 /// <summary>
 /// 查目前使用者的 SID 在這個資料夾上是不是有一條符合的 Deny ACE，邏輯對應
@@ -94,6 +114,8 @@ static bool IsFolderGuardLocked(const std::wstring& path)
         return false;
     }
 
+    const DWORD deniedRightsMask = GetFolderGuardDeniedRightsMask();
+
     bool isLocked = false;
     for (WORD i = 0; i < pDacl->AceCount; i++)
     {
@@ -112,7 +134,7 @@ static bool IsFolderGuardLocked(const std::wstring& path)
         auto* pDeniedAce = static_cast<ACCESS_DENIED_ACE*>(pAce);
         PSID aceSid = reinterpret_cast<PSID>(&pDeniedAce->SidStart);
 
-        if (EqualSid(aceSid, currentUserSid) && (pDeniedAce->Mask & kFolderGuardDeniedRights) == kFolderGuardDeniedRights)
+        if (EqualSid(aceSid, currentUserSid) && (pDeniedAce->Mask & deniedRightsMask) == deniedRightsMask)
         {
             isLocked = true;
             break;

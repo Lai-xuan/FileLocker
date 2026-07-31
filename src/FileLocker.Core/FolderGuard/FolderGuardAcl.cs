@@ -15,6 +15,14 @@ public static class FolderGuardAcl
     private const FileSystemRights DeniedRights =
         FileSystemRights.ReadAndExecute | FileSystemRights.Write | FileSystemRights.Delete;
 
+    /// <summary>
+    /// 給 dllmain.cpp 用的執行期單一來源：C++ 端右鍵選單判斷「這個資料夾是否已鎖定」原本
+    /// 自己手動維護另一份位元遮罩常數，兩邊只靠註解要求「保持一致」，曾經因此對不上而讓選單
+    /// 永遠判斷成「未鎖定」。現在 <see cref="FileLocker.App.ShellExtensionRegistrar"/> 在
+    /// 啟動時把這個值寫進登錄檔，dllmain.cpp 改成執行期讀登錄檔裡的這個值，只有這裡一份定義。
+    /// </summary>
+    public const int DeniedRightsMask = (int)DeniedRights;
+
     public static void ApplyDeny(string folderPath)
     {
         var currentUser = GetCurrentUserSid();
