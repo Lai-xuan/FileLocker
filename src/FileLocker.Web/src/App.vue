@@ -1,5 +1,7 @@
 <script setup>
 import { ref, watch, computed, nextTick, onMounted, onUnmounted } from 'vue'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import '@fontsource/ibm-plex-sans/400.css'
 import '@fontsource/ibm-plex-sans/500.css'
 import '@fontsource/ibm-plex-sans/600.css'
@@ -232,6 +234,24 @@ const warningIconUrl = computed(() => settingsTheme.value === 'dark' ? warningDa
 const settingsSaveMessage = ref('')
 const isChangingVaultPath = ref(false)
 
+// ---- 資料夾防護頁籤：純 ACL 存取限制，不加密，跟「加密」是完全獨立的保護機制，見
+// FileLocker_資料夾防護_功能規劃.md。整個功能共用一組密碼＋選配 Passkey（不像加密每項目
+//各自一組），密碼必填、Passkey 選配，密碼永遠是保底解鎖手段。 ----
+const folderGuardConfigured = ref(false)
+const folderGuardPasskeyEnabled = ref(false)
+const folderGuardItems = ref([])
+const isLoadingFolderGuard = ref(false)
+const folderGuardSetupPassword = ref('')
+const folderGuardSetupPasswordConfirm = ref('')
+// 右鍵「上鎖」在整個功能還沒設定過密碼時，會先開主視窗導引完成首次設定（見 App.xaml.cs
+// HandleFolderGuardLockLaunch），這裡暫存那批路徑，設定完成後自動接著上鎖，不用使用者
+// 再手動選一次資料夾。
+const folderGuardPendingLockPaths = ref([])
+// 加密流程撞到巢狀防護中的資料夾（見 LockService.EncryptAsync 的 FolderGuardContainsNestedGuarded
+// 錯誤碼）、使用者確認解鎖後，要重新送出的原始加密請求——只在單一項目加密時提供這個「解鎖並
+// 重試」的引導，批次多筆的重試協調複雜度不成比例，直接照一般錯誤訊息處理即可。
+const pendingNestedGuardedRetry = ref(null)
+
 // ---- 加密頁籤：分兩步驟，第一步只選檔案/資料夾，第二步才是密碼跟進階選項——
 // 兩者視覺權重差很多（一個是必經流程，一個是偶爾用得到的進階功能），分開後主線操作
 // 不會被一長串表單稀釋掉。 ----
@@ -246,6 +266,10 @@ const encryptPasswordConfirm = ref('')
 // 密碼跟確認密碼共用同一個顯示/隱藏狀態——兩個欄位本來就是要互相核對，同時顯示比較好核對，
 // 沒必要分開切換。
 const showEncryptPassword = ref(false)
+const showDecryptPassword = ref(false)
+// 密碼／確認密碼共用同一個顯示狀態，理由同上（見 showEncryptPassword 註解）。
+const showFolderGuardSetupPassword = ref(false)
+const showPasswordPromptValue = ref(false)
 const hint = ref('')
 const enablePasskey = ref(false)
 const enableRecoveryKey = ref(false)
@@ -436,10 +460,44 @@ watch(recoveryKeyPromptItem, (item) => {
 // 使用說明彈窗：內容比其他彈窗長很多，需要能捲動，用獨立的 modal--help 樣式處理。
 const isHelpOpen = ref(false)
 
+const isCheckingUpdate = ref(false)
+const isInstallingUpdate = ref(false)
+const updateCheckResult = ref(null) // null | { currentVersion, latestVersion, updateAvailable, releaseNotes, hasDownloadUrl }
+
+// 更新彈窗獨立於通用的 askConfirm/confirmDialogState 之外——release notes 需要可捲動的
+// Markdown 渲染框框，通用彈窗是給其他 9 處短句訊息用的，不能為了這一個情境改動它的樣式。
+// 彈窗本身就是唯一入口（裡面的「更新」按鈕直接動手做事），不用像 askConfirm 那樣包一層
+// Promise 把結果丟回呼叫端決定下一步，單純開/關布林狀態就夠。
+const isUpdateModalOpen = ref(false)
+
+function openUpdateDetailsModal() {
+  isUpdateModalOpen.value = true
+}
+
+// 下載中不能被關掉——背景點擊/取消鍵都要被這個擋下來，避免使用者以為取消了、其實後端還在
+// 背景繼續下載安裝（IPC 呼叫不會因為彈窗關掉就中止）。
+function closeUpdateDetailsModal() {
+  if (isInstallingUpdate.value) {
+    return
+  }
+  isUpdateModalOpen.value = false
+}
+
+// GitHub release body 雖然是使用者自己 repo 發布的內容，但 marked 轉出來的 HTML 還是先過一次
+// DOMPurify 淨化才用 v-html 注入，避免 Markdown 原文裡混雜的任何原始 HTML/script 被直接執行。
+const renderedReleaseNotes = computed(() => {
+  const raw = updateCheckResult.value?.releaseNotes || ''
+  return DOMPurify.sanitize(marked.parse(raw))
+})
+
 // 密碼輸入彈窗：取代原本用瀏覽器原生 prompt() 明碼輸入密碼的做法——prompt() 的輸入框不會把
 // 打字內容用點點遮起來，旁邊有人看、或畫面被錄影/遠端連線時會直接看到密碼，這裡改用跟
 // 其他表單一致的遮罩密碼欄位。
-const passwordPromptContext = ref(null) // { mode: 'single' | 'batch' | 'delete', item或group, destinationDir }
+// mode 額外多了五種資料夾防護用途：'folderGuardUnlock'（item）、'folderGuardUnlockAll'（無額外欄位）、
+// 'folderGuardNestedEncrypt'（nestedPaths）、'folderGuardDisable'（無額外欄位）、
+// 'folderGuardDisablePasskey'（無額外欄位）——這裡的密碼是資料夾防護的共用密碼，跟加密/解密用的
+// 密碼是完全不同的命名空間，共用這個彈窗純粹是因為「輸入密碼」這個互動外觀一致，不代表憑證共用。
+const passwordPromptContext = ref(null) // { mode: 'single' | 'batch' | 'delete' | 'folderGuardUnlock' | 'folderGuardUnlockAll' | 'folderGuardNestedEncrypt' | 'folderGuardDisable' | 'folderGuardDisablePasskey', item或group, destinationDir, nestedPaths }
 const passwordPromptValue = ref('')
 const passwordPromptInputRef = ref(null)
 
@@ -504,6 +562,12 @@ const messageHandlers = {
   encryptItemResult(data) {
     if (data.success) {
       markLocalVaultMutation()
+    }
+    // 加密流程撞到巢狀防護中的資料夾：只在單一項目加密時額外提供「解鎖並重試」引導
+    // （見 handleNestedGuardedEncrypt 說明），失敗結果本身仍然照常推進 encryptItemResults，
+    // 讓完成頁一樣看得到這筆失敗紀錄。
+    if (data.errorCode === 'FOLDER_GUARD_CONTAINS_NESTED_GUARDED' && encryptPaths.value.length <= 1) {
+      handleNestedGuardedEncrypt(data)
     }
     let note = ''
     if (data.passkeyRequested && !data.passkeyEnabled) {
@@ -694,6 +758,8 @@ const messageHandlers = {
     } else if (data.purpose === 'vaultFolder') {
       isChangingVaultPath.value = true
       sendMessage('changeVaultPath', { newPath: data.path })
+    } else if (data.purpose === 'folderGuardLock') {
+      sendMessage('lockFolders', { paths: [data.path] })
     } else {
       // 資料夾選擇（單選）走這裡，加到清單裡而不是取代整份清單。
       if (!encryptPaths.value.includes(data.path)) {
@@ -833,10 +899,73 @@ const messageHandlers = {
   },
 
   initialPaths(data) {
-    // 從 Shell Extension 右鍵選單過來的路徑清單，切到加密頁籤、整份清單都帶進去。
+    // action 由後端決定要切去哪個分頁：'folderGuardSetup' 是右鍵「上鎖」但整個資料夾防護功能
+    // 還沒設定過共用密碼時的引導路徑（見 App.xaml.cs HandleFolderGuardLockLaunch）；其餘
+    // （包含沒有 action 欄位的既有情境）維持原本行為，切到加密頁籤。
+    if (data.action === 'folderGuardSetup') {
+      activeTab.value = 'folderGuard'
+      folderGuardPendingLockPaths.value = data.paths ? [...data.paths] : []
+      return
+    }
     activeTab.value = 'encrypt'
     if (data.paths && data.paths.length > 0) {
       encryptPaths.value = [...data.paths]
+    }
+  },
+
+  folderGuardListResult(data) {
+    resolvePending('folderGuardListResult', data)
+  },
+
+  setupFolderGuardCredentialResult(data) {
+    resolvePending('setupFolderGuardCredentialResult', data)
+  },
+
+  setupFolderGuardPasskeyResult(data) {
+    resolvePending('setupFolderGuardPasskeyResult', data)
+  },
+
+  disableFolderGuardPasskeyResult(data) {
+    resolvePending('disableFolderGuardPasskeyResult', data)
+  },
+
+  checkForUpdatesResult(data) {
+    resolvePending('checkForUpdatesResult', data)
+  },
+
+  downloadAndInstallUpdateResult(data) {
+    resolvePending('downloadAndInstallUpdateResult', data)
+  },
+
+  disableFolderGuardResult(data) {
+    resolvePending('disableFolderGuardResult', data)
+  },
+
+  unlockFolderResult(data) {
+    resolvePending('unlockFolderResult', data)
+  },
+
+  unlockAllFoldersResult(data) {
+    resolvePending('unlockAllFoldersResult', data)
+  },
+
+  removeFolderGuardEntryResult(data) {
+    resolvePending('removeFolderGuardEntryResult', data)
+  },
+
+  unlockFoldersForEncryptionResult(data) {
+    resolvePending('unlockFoldersForEncryptionResult', data)
+  },
+
+  lockFoldersResult(data) {
+    // 來自右鍵選單批次上鎖（首次設定完成後自動接續）、或分頁內「新增資料夾」按鈕——
+    // 完成後一律重新整理清單，個別失敗的項目用 toast 提示，不中斷其他成功的項目。
+    const failedCount = data.items.filter((item) => !item.success).length
+    if (failedCount > 0) {
+      showToast(t('folderGuard.lockPartialFailed', { count: failedCount }))
+    }
+    if (activeTab.value === 'folderGuard') {
+      refreshFolderGuardList()
     }
   }
 }
@@ -857,6 +986,12 @@ watch(activeTab, (tab) => {
     refreshList()
   } else if (tab === 'settings') {
     sendMessage('getSettings')
+    // 設定頁裡的「資料夾防護密碼／Passkey」區塊需要 folderGuardConfigured／folderGuardPasskeyEnabled
+    // 這兩個狀態——使用者可能直接切到設定頁、根本沒去過「資料夾防護」分頁，這兩個值會是預設的
+    // false，錯誤顯示成「尚未設定」，所以這裡也要主動刷新一次。
+    refreshFolderGuardList()
+  } else if (tab === 'folderGuard') {
+    refreshFolderGuardList()
   }
 })
 
@@ -918,6 +1053,226 @@ function refreshHistory() {
   isLoadingHistory.value = true
   historyLoadStartedAt = Date.now()
   sendMessage('listHistory')
+}
+
+// ---- 資料夾防護（Folder Guard）----
+
+async function refreshFolderGuardList() {
+  isLoadingFolderGuard.value = true
+  const data = await requestMessage('listFolderGuard', 'folderGuardListResult')
+  isLoadingFolderGuard.value = false
+  folderGuardConfigured.value = data.configured
+  folderGuardPasskeyEnabled.value = data.passkeyEnabled
+  folderGuardItems.value = data.items
+}
+
+async function submitFolderGuardSetup() {
+  if (!folderGuardSetupPassword.value) {
+    showToast(t('folderGuard.passwordRequired'))
+    return
+  }
+  if (folderGuardSetupPassword.value !== folderGuardSetupPasswordConfirm.value) {
+    showToast(t('folderGuard.passwordMismatch'))
+    return
+  }
+
+  await requestMessage('setupFolderGuardCredential', 'setupFolderGuardCredentialResult', {
+    password: folderGuardSetupPassword.value
+  })
+  folderGuardSetupPassword.value = ''
+  folderGuardSetupPasswordConfirm.value = ''
+  folderGuardConfigured.value = true
+  showToast(t('folderGuard.passwordSetupSuccess'), 'success')
+
+  // 右鍵「上鎖」在還沒設定過密碼時，是先開這個分頁導引完成設定，設定完成後要接著把當初
+  // 選取的那批資料夾真的上鎖，不用使用者自己再選一次（見 initialPaths 的 folderGuardSetup 分支）。
+  if (folderGuardPendingLockPaths.value.length > 0) {
+    sendMessage('lockFolders', { paths: folderGuardPendingLockPaths.value })
+    folderGuardPendingLockPaths.value = []
+  }
+
+  refreshFolderGuardList()
+}
+
+async function setupFolderGuardPasskeyAction() {
+  const result = await requestMessage('setupFolderGuardPasskey', 'setupFolderGuardPasskeyResult')
+  if (result.success) {
+    folderGuardPasskeyEnabled.value = true
+    showToast(t('folderGuard.passkeySetupSuccess'), 'success')
+  } else {
+    showToast(t('folderGuard.passkeySetupFailed'))
+  }
+}
+
+// 只停用 Passkey、保留密碼，一樣要先驗證身份——但這裡刻意保留「Passkey 驗證失敗就退回密碼」的
+// fallback，跟其他四個驗證點（Passkey 已設定就只認 Passkey）不一樣：這顆按鈕本來就是 Passkey
+// 硬體出問題時的逃生門，如果連這裡都不能退回密碼，使用者就真的被鎖死了。
+async function disableFolderGuardPasskeyAction() {
+  const confirmed = await askConfirm(t('folderGuard.passkeyDisableConfirm'), { variant: 'danger' })
+  if (!confirmed) {
+    return
+  }
+  const result = await requestMessage('disableFolderGuardPasskey', 'disableFolderGuardPasskeyResult', {})
+  if (result.success) {
+    folderGuardPasskeyEnabled.value = false
+    showToast(t('folderGuard.passkeyDisabled'), 'success')
+    return
+  }
+  passwordPromptContext.value = { mode: 'folderGuardDisablePasskey' }
+  passwordPromptValue.value = ''
+}
+
+async function checkForUpdatesAction() {
+  isCheckingUpdate.value = true
+  updateCheckResult.value = null
+  const result = await requestMessage('checkForUpdates', 'checkForUpdatesResult', {})
+  isCheckingUpdate.value = false
+  if (result.success) {
+    updateCheckResult.value = result
+    // 發現新版本就直接跳出彈窗，不用讓使用者自己往下滑再手動點按鈕才看得到結果。
+    if (result.updateAvailable) {
+      isUpdateModalOpen.value = true
+    }
+  } else {
+    showToast(translateError(result.errorCode, result.errorDetail, t('settings.updateCheckFailed')))
+  }
+}
+
+function openReleasesPageAction() {
+  sendMessage('openReleasesPage', {})
+}
+
+// 彈窗裡的「更新」按鈕點下去就是唯一的確認動作，不用再跳第二次確認彈窗。
+async function installUpdateAction() {
+  isInstallingUpdate.value = true
+  const result = await requestMessage('downloadAndInstallUpdate', 'downloadAndInstallUpdateResult', {})
+  isInstallingUpdate.value = false
+  if (!result.success) {
+    showToast(translateError(result.errorCode, result.errorDetail, t('settings.updateDownloadFailed')))
+  }
+  isUpdateModalOpen.value = false
+  // 成功的話後端會自己呼叫 Application.Current.Shutdown()，視窗接下來就會直接關掉，
+  // 這裡關彈窗純粹是為了失敗時能回到設定頁看 toast。
+}
+
+async function disableFolderGuardAction() {
+  const confirmed = await askConfirm(t('folderGuard.disableConfirm'), { variant: 'danger' })
+  if (!confirmed) {
+    return
+  }
+
+  // Passkey 已設定就只能用 Passkey，失敗/取消不會退回密碼輸入框——要改用密碼得先去設定頁
+  // 停用 Passkey（disableFolderGuardPasskeyAction）。
+  if (folderGuardPasskeyEnabled.value) {
+    const result = await requestMessage('disableFolderGuard', 'disableFolderGuardResult', {})
+    if (result.success) {
+      folderGuardConfigured.value = false
+      folderGuardPasskeyEnabled.value = false
+      showToast(t('folderGuard.disabled'), 'success')
+    } else {
+      showToast(translateError(result.errorCode, result.errorDetail, t('folderGuard.disableFailed')))
+    }
+    return
+  }
+  passwordPromptContext.value = { mode: 'folderGuardDisable' }
+  passwordPromptValue.value = ''
+}
+
+function pickFolderGuardFolder() {
+  sendMessage('pickFolder', { purpose: 'folderGuardLock' })
+}
+
+async function unlockFolderGuardItem(item) {
+  // Passkey 已設定就只能用 Passkey，不用先跳密碼輸入框——跟 .locked 檔案的既有互動模式一致
+  // （規格文件 14.4 節）；失敗/取消不會退回密碼輸入，要改用密碼得先去設定頁停用 Passkey。
+  if (folderGuardPasskeyEnabled.value) {
+    const result = await requestMessage('unlockFolder', 'unlockFolderResult', {
+      path: item.path, keepInListAsUnlocked: true
+    })
+    if (result.success) {
+      showToast(t('folderGuard.unlockSuccess'), 'success')
+      refreshFolderGuardList()
+    } else {
+      showToast(translateError(result.errorCode, result.errorDetail, t('folderGuard.unlockFailed')))
+    }
+    return
+  }
+  passwordPromptContext.value = { mode: 'folderGuardUnlock', item }
+  passwordPromptValue.value = ''
+}
+
+async function confirmUnlockAllFolderGuard() {
+  const confirmed = await askConfirm(t('folderGuard.unlockAllConfirm'), { variant: 'danger' })
+  if (!confirmed) {
+    return
+  }
+  // Passkey 已設定就只能用 Passkey，失敗/取消不會退回密碼輸入框。
+  if (folderGuardPasskeyEnabled.value) {
+    const result = await requestMessage('unlockAllFolders', 'unlockAllFoldersResult', {})
+    if (result.success) {
+      showToast(t('folderGuard.unlockAllSuccess'), 'success')
+      refreshFolderGuardList()
+    } else {
+      showToast(translateError(result.errorCode, result.errorDetail, t('folderGuard.unlockFailed')))
+    }
+    return
+  }
+  passwordPromptContext.value = { mode: 'folderGuardUnlockAll' }
+  passwordPromptValue.value = ''
+}
+
+async function removeFolderGuardListEntry(item) {
+  await requestMessage('removeFolderGuardEntry', 'removeFolderGuardEntryResult', { path: item.path })
+  refreshFolderGuardList()
+}
+
+function openFolderGuardItemInExplorer(item) {
+  sendMessage('openFolderInExplorer', { path: item.path })
+}
+
+// 重用「新增資料夾」既有的 lockFolders IPC（見 submitFolderGuardSetup），上鎖本身不需要密碼驗證
+// （規劃文件第 6 節：密碼只用來驗證解鎖身份），這裡也一樣不用先跳確認彈窗或密碼輸入。
+function relockFolderGuardItem(item) {
+  sendMessage('lockFolders', { paths: [item.path] })
+}
+
+/// 對應規劃文件第 8 節：加密流程掃描到巢狀防護中的資料夾而中止，前端跳彈窗列出這些子資料夾，
+/// 使用者確認後解鎖（Passkey 優先、沒設定則密碼）、成功才重新送出原本的加密請求。只在單一項目
+/// 加密時提供這個引導——批次多筆的重試協調複雜度不成比例，直接照一般錯誤訊息處理即可。
+async function handleNestedGuardedEncrypt(data) {
+  const nestedPaths = (data.errorDetail || '').split('|').filter(Boolean)
+  const nestedNames = nestedPaths.map((p) => p.split(/[\\/]/).pop()).join('、')
+  const retry = {
+    paths: [...encryptPaths.value],
+    password: encryptPassword.value,
+    hint: hint.value,
+    enablePasskey: enablePasskey.value,
+    enableRecoveryKey: enableRecoveryKey.value
+  }
+
+  const confirmed = await askConfirm(t('folderGuard.nestedGuardedPrompt', { names: nestedNames }), {
+    confirmLabel: t('folderGuard.unlock')
+  })
+  if (!confirmed) {
+    return
+  }
+
+  // Passkey 已設定就只能用 Passkey，失敗/取消不會退回密碼輸入框。
+  if (folderGuardPasskeyEnabled.value) {
+    const result = await requestMessage('unlockFoldersForEncryption', 'unlockFoldersForEncryptionResult', { paths: nestedPaths })
+    if (result.success) {
+      isEncrypting.value = true
+      encryptItemResults.value = []
+      sendMessage('encrypt', retry)
+    } else {
+      showToast(translateError(result.errorCode, result.errorDetail, t('folderGuard.unlockFailed')))
+    }
+    return
+  }
+
+  pendingNestedGuardedRetry.value = retry
+  passwordPromptContext.value = { mode: 'folderGuardNestedEncrypt', nestedPaths }
+  passwordPromptValue.value = ''
 }
 
 // 三個步驟，缺一不可：①先問「真的要刪嗎」，確定鍵本身就是「用 Passkey 驗證身份」的觸發鍵——
@@ -1153,13 +1508,14 @@ function promptPasswordAndDecrypt(item, destinationDir) {
   passwordPromptValue.value = ''
 }
 
-function submitPasswordPrompt() {
+async function submitPasswordPrompt() {
   const ctx = passwordPromptContext.value
   const password = passwordPromptValue.value
   if (!ctx || !password) {
     return
   }
   passwordPromptContext.value = null
+  showPasswordPromptValue.value = false
 
   if (ctx.mode === 'batch') {
     decryptingBatchIds.value.add(ctx.group.batchId)
@@ -1170,6 +1526,56 @@ function submitPasswordPrompt() {
   } else if (ctx.mode === 'delete') {
     pendingDeleteItem.value = ctx.item
     sendMessage('verifyPasswordForDelete', { uuid: ctx.item.uuid, password })
+  } else if (ctx.mode === 'folderGuardUnlock') {
+    const result = await requestMessage('unlockFolder', 'unlockFolderResult', {
+      path: ctx.item.path, password, keepInListAsUnlocked: true
+    })
+    if (result.success) {
+      showToast(t('folderGuard.unlockSuccess'), 'success')
+      refreshFolderGuardList()
+    } else {
+      showToast(translateError(result.errorCode, result.errorDetail, t('folderGuard.unlockFailed')))
+    }
+  } else if (ctx.mode === 'folderGuardUnlockAll') {
+    const result = await requestMessage('unlockAllFolders', 'unlockAllFoldersResult', { password })
+    if (result.success) {
+      showToast(t('folderGuard.unlockAllSuccess'), 'success')
+      refreshFolderGuardList()
+    } else {
+      showToast(translateError(result.errorCode, result.errorDetail, t('folderGuard.unlockFailed')))
+    }
+  } else if (ctx.mode === 'folderGuardNestedEncrypt') {
+    const retry = pendingNestedGuardedRetry.value
+    pendingNestedGuardedRetry.value = null
+    const result = await requestMessage('unlockFoldersForEncryption', 'unlockFoldersForEncryptionResult', {
+      paths: ctx.nestedPaths, password
+    })
+    if (!result.success) {
+      showToast(translateError(result.errorCode, result.errorDetail, t('folderGuard.unlockFailed')))
+      return
+    }
+    if (retry) {
+      isEncrypting.value = true
+      encryptItemResults.value = []
+      sendMessage('encrypt', retry)
+    }
+  } else if (ctx.mode === 'folderGuardDisable') {
+    const result = await requestMessage('disableFolderGuard', 'disableFolderGuardResult', { password })
+    if (result.success) {
+      folderGuardConfigured.value = false
+      folderGuardPasskeyEnabled.value = false
+      showToast(t('folderGuard.disabled'), 'success')
+    } else {
+      showToast(translateError(result.errorCode, result.errorDetail, t('folderGuard.disableFailed')))
+    }
+  } else if (ctx.mode === 'folderGuardDisablePasskey') {
+    const result = await requestMessage('disableFolderGuardPasskey', 'disableFolderGuardPasskeyResult', { password })
+    if (result.success) {
+      folderGuardPasskeyEnabled.value = false
+      showToast(t('folderGuard.passkeyDisabled'), 'success')
+    } else {
+      showToast(translateError(result.errorCode, result.errorDetail, t('folderGuard.passkeyDisableFailed')))
+    }
   } else {
     decryptingUuids.value.add(ctx.item.uuid)
     sendMessage('decryptByUuid', { uuid: ctx.item.uuid, password, destinationDir: ctx.destinationDir })
@@ -1178,6 +1584,7 @@ function submitPasswordPrompt() {
 
 function cancelPasswordPrompt() {
   passwordPromptContext.value = null
+  showPasswordPromptValue.value = false
 }
 
 // 清單頁用 Passkey 解密：一樣先問還原到原始位置、還是自己選地方存，不需要輸入密碼，
@@ -1396,6 +1803,7 @@ function historyDetailText(entry) {
       <button :ref="(el) => setTabRef('encrypt', el)" class="tab-bar__item" :class="{ 'is-active': activeTab === 'encrypt' }" @click="activeTab = 'encrypt'">{{ t('tab.encrypt') }}</button>
       <button :ref="(el) => setTabRef('decrypt', el)" class="tab-bar__item" :class="{ 'is-active': activeTab === 'decrypt' }" @click="activeTab = 'decrypt'">{{ t('tab.decrypt') }}</button>
       <button :ref="(el) => setTabRef('list', el)" class="tab-bar__item" :class="{ 'is-active': activeTab === 'list' }" @click="activeTab = 'list'">{{ t('tab.list') }}</button>
+      <button :ref="(el) => setTabRef('folderGuard', el)" class="tab-bar__item" :class="{ 'is-active': activeTab === 'folderGuard' }" @click="activeTab = 'folderGuard'">{{ t('tab.folderGuard') }}</button>
       <button :ref="(el) => setTabRef('settings', el)" class="tab-bar__item" :class="{ 'is-active': activeTab === 'settings' }" @click="activeTab = 'settings'">{{ t('tab.settings') }}</button>
       <span class="tab-bar__indicator" :style="tabIndicatorStyle"></span>
     </nav>
@@ -1458,7 +1866,7 @@ function historyDetailText(entry) {
                 <button
                   type="button"
                   class="password-field__toggle"
-                  :aria-label="t(showEncryptPassword ? 'encrypt.hidePassword' : 'encrypt.showPassword')"
+                  :aria-label="t(showEncryptPassword ? 'common.hidePassword' : 'common.showPassword')"
                   @click="showEncryptPassword = !showEncryptPassword"
                 >
                   <svg v-if="showEncryptPassword" viewBox="0 0 24 24" fill="none"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="2.75" stroke="currentColor" stroke-width="1.6"/></svg>
@@ -1579,7 +1987,18 @@ function historyDetailText(entry) {
 
           <div class="field">
             <label class="field__label">{{ t('decrypt.passwordLabel') }}</label>
-            <input v-model="decryptPassword" type="password" class="text-input" @keyup.enter="submitDecrypt" />
+            <div class="password-field">
+              <input v-model="decryptPassword" :type="showDecryptPassword ? 'text' : 'password'" class="text-input" @keyup.enter="submitDecrypt" />
+              <button
+                type="button"
+                class="password-field__toggle"
+                :aria-label="t(showDecryptPassword ? 'common.hidePassword' : 'common.showPassword')"
+                @click="showDecryptPassword = !showDecryptPassword"
+              >
+                <svg v-if="showDecryptPassword" viewBox="0 0 24 24" fill="none"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="2.75" stroke="currentColor" stroke-width="1.6"/></svg>
+                <svg v-else viewBox="0 0 24 24" fill="none"><path d="M3 3l18 18M9.9 5.1A10.7 10.7 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17.1 17.1 0 0 1-3.15 4.05M6.5 6.9C4.1 8.6 2.5 12 2.5 12s3.5 6.5 9.5 6.5c1.1 0 2.1-.2 3-.55M14.1 14.1a2.75 2.75 0 0 1-3.9-3.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+            </div>
           </div>
 
           <button class="button button--primary" @click="submitDecrypt" :disabled="isDecrypting || !decryptPath || !decryptPassword">
@@ -1857,6 +2276,121 @@ function historyDetailText(entry) {
           </div>
         </div>
 
+        <div v-else-if="activeTab === 'folderGuard'" key="folderGuard">
+          <h1 class="page-title">
+            <svg class="page-title__icon" viewBox="0 0 24 24" fill="none"><rect x="4" y="10" width="16" height="11" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M8 10V7.5a4 4 0 1 1 8 0V10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            {{ t('tab.folderGuard') }}
+          </h1>
+          <p class="hint-text">
+            {{ t('folderGuard.pageDescriptionPrefix') }}
+            <span class="text-warning-soft">{{ t('folderGuard.pageDescriptionWarning') }}</span>
+            {{ t('folderGuard.pageDescriptionSuffix') }}
+            <button class="link-button" @click="activeTab = 'encrypt'" type="button">{{ t('tab.encrypt') }}</button>
+          </p>
+
+          <!-- 首次設定：整個功能還沒設定過共用密碼前，只能先設定密碼，不能上鎖任何資料夾
+               （規劃文件第 3、6 節）。 -->
+          <section v-if="!folderGuardConfigured" class="settings-section">
+            <h3 class="settings-section__title">{{ t('folderGuard.setupTitle') }}</h3>
+            <p class="hint-text">{{ t('folderGuard.setupDescription') }}</p>
+            <div class="field">
+              <label class="field__label">{{ t('folderGuard.passwordLabel') }}</label>
+              <div class="password-field">
+                <input v-model="folderGuardSetupPassword" :type="showFolderGuardSetupPassword ? 'text' : 'password'" class="text-input" />
+                <button
+                  type="button"
+                  class="password-field__toggle"
+                  :aria-label="t(showFolderGuardSetupPassword ? 'common.hidePassword' : 'common.showPassword')"
+                  @click="showFolderGuardSetupPassword = !showFolderGuardSetupPassword"
+                >
+                  <svg v-if="showFolderGuardSetupPassword" viewBox="0 0 24 24" fill="none"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="2.75" stroke="currentColor" stroke-width="1.6"/></svg>
+                  <svg v-else viewBox="0 0 24 24" fill="none"><path d="M3 3l18 18M9.9 5.1A10.7 10.7 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17.1 17.1 0 0 1-3.15 4.05M6.5 6.9C4.1 8.6 2.5 12 2.5 12s3.5 6.5 9.5 6.5c1.1 0 2.1-.2 3-.55M14.1 14.1a2.75 2.75 0 0 1-3.9-3.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="field">
+              <label class="field__label">{{ t('folderGuard.passwordConfirmLabel') }}</label>
+              <div class="password-field">
+                <input v-model="folderGuardSetupPasswordConfirm" :type="showFolderGuardSetupPassword ? 'text' : 'password'" class="text-input" @keyup.enter="submitFolderGuardSetup" />
+                <button
+                  type="button"
+                  class="password-field__toggle"
+                  :aria-label="t(showFolderGuardSetupPassword ? 'common.hidePassword' : 'common.showPassword')"
+                  @click="showFolderGuardSetupPassword = !showFolderGuardSetupPassword"
+                >
+                  <svg v-if="showFolderGuardSetupPassword" viewBox="0 0 24 24" fill="none"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="2.75" stroke="currentColor" stroke-width="1.6"/></svg>
+                  <svg v-else viewBox="0 0 24 24" fill="none"><path d="M3 3l18 18M9.9 5.1A10.7 10.7 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17.1 17.1 0 0 1-3.15 4.05M6.5 6.9C4.1 8.6 2.5 12 2.5 12s3.5 6.5 9.5 6.5c1.1 0 2.1-.2 3-.55M14.1 14.1a2.75 2.75 0 0 1-3.9-3.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+              </div>
+            </div>
+            <button class="button button--primary" @click="submitFolderGuardSetup" type="button">{{ t('folderGuard.setupSubmit') }}</button>
+          </section>
+
+          <template v-else>
+            <div class="button-row">
+              <button class="button button--primary" @click="pickFolderGuardFolder" type="button">{{ t('folderGuard.addFolder') }}</button>
+              <button class="button button--secondary" @click="refreshFolderGuardList" :disabled="isLoadingFolderGuard" type="button">
+                {{ isLoadingFolderGuard ? t('list.loading') : t('list.refresh') }}
+              </button>
+              <button
+                v-if="folderGuardItems.some((item) => item.status === 'Locked')"
+                class="button button--danger"
+                style="margin-left: auto;"
+                @click="confirmUnlockAllFolderGuard"
+                type="button"
+              >
+                {{ t('folderGuard.unlockAllButton') }}
+              </button>
+            </div>
+
+            <div v-if="!isLoadingFolderGuard && folderGuardItems.length === 0" class="empty-state-block">
+              <svg class="empty-state-block__icon" viewBox="0 0 24 24" fill="none"><rect x="4" y="10" width="16" height="11" rx="2.5" stroke="currentColor" stroke-width="1.6"/><path d="M8 10V8a4 4 0 1 1 8 0v2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+              <p class="empty-state-block__text">{{ t('folderGuard.noItems') }}</p>
+            </div>
+
+            <div v-if="folderGuardItems.length > 0" class="table-scroll">
+              <table class="table table--folder-guard">
+                <colgroup>
+                  <col style="width: 65%;" />
+                  <col style="width: 20%;" />
+                  <col style="width: 15%;" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>{{ t('folderGuard.colPath') }}</th>
+                    <th>{{ t('folderGuard.colStatus') }}</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="item in folderGuardItems" :key="item.path">
+                    <td><div class="cell-name" :title="item.path">{{ item.path }}</div></td>
+                    <td>{{ item.status === 'Locked' ? t('folderGuard.statusLocked') : t('folderGuard.statusUnlocked') }}</td>
+                    <td>
+                      <div class="table__actions">
+                        <button v-if="item.status === 'Locked'" class="button button--tiny" @click="unlockFolderGuardItem(item)" type="button">
+                          {{ t('folderGuard.unlock') }}
+                        </button>
+                        <template v-else>
+                          <button class="button button--tiny" @click="openFolderGuardItemInExplorer(item)" type="button">
+                            {{ t('folderGuard.openFolder') }}
+                          </button>
+                          <button class="button button--tiny" @click="relockFolderGuardItem(item)" type="button">
+                            {{ t('folderGuard.relock') }}
+                          </button>
+                          <button class="button button--tiny" @click="removeFolderGuardListEntry(item)" type="button">
+                            {{ t('folderGuard.removeFromList') }}
+                          </button>
+                        </template>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </div>
+
         <div v-else-if="activeTab === 'settings'" key="settings">
           <h1 class="page-title">
             <svg class="page-title__icon" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.7"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -1913,8 +2447,49 @@ function historyDetailText(entry) {
           </section>
 
           <section class="settings-section">
+            <h3 class="settings-section__title">{{ t('folderGuard.credentialTitle') }}</h3>
+            <template v-if="folderGuardConfigured">
+              <div class="button-row">
+                <button class="button button--secondary" @click="setupFolderGuardPasskeyAction" type="button">
+                  <img :src="passkeyIconUrl" alt="" class="button__icon" />
+                  {{ folderGuardPasskeyEnabled ? t('folderGuard.passkeyResetupButton') : t('folderGuard.passkeySetupButton') }}
+                </button>
+                <button v-if="folderGuardPasskeyEnabled" class="button button--secondary" @click="disableFolderGuardPasskeyAction" type="button">
+                  {{ t('folderGuard.passkeyDisableButton') }}
+                </button>
+                <button class="button button--danger" @click="disableFolderGuardAction" type="button">{{ t('folderGuard.disableButton') }}</button>
+              </div>
+              <p class="hint-text">{{ t('folderGuard.forgotPasswordHint') }}</p>
+            </template>
+            <template v-else>
+              <p class="hint-text">
+                {{ t('folderGuard.settingsNotConfiguredHint') }}
+                <button class="link-button" @click="activeTab = 'folderGuard'" type="button">{{ t('tab.folderGuard') }}</button>
+              </p>
+            </template>
+          </section>
+
+          <section class="settings-section">
             <h3 class="settings-section__title">{{ t('settings.helpTitle') }}</h3>
             <button class="button button--secondary" @click="isHelpOpen = true" type="button">{{ t('settings.helpButton') }}</button>
+          </section>
+
+          <section class="settings-section">
+            <h3 class="settings-section__title">{{ t('settings.updateCheckTitle') }}</h3>
+            <button class="button button--secondary" @click="checkForUpdatesAction" type="button" :disabled="isCheckingUpdate">
+              {{ isCheckingUpdate ? t('settings.updateCheckChecking') : t('settings.updateCheckButton') }}
+            </button>
+            <p v-if="updateCheckResult && !updateCheckResult.updateAvailable" class="hint-text">
+              {{ t('settings.updateCheckUpToDate', { version: updateCheckResult.currentVersion }) }}
+            </p>
+            <template v-else-if="updateCheckResult && updateCheckResult.updateAvailable">
+              <p class="status-message status-message--success">
+                {{ t('settings.updateCheckAvailable', { version: updateCheckResult.latestVersion }) }}
+              </p>
+              <button class="button button--primary" @click="openUpdateDetailsModal" type="button">
+                {{ t('settings.updateViewDetailsButton') }}
+              </button>
+            </template>
           </section>
 
           <p v-if="settingsSaveMessage" class="status-message status-message--success">{{ settingsSaveMessage }}</p>
@@ -1949,6 +2524,34 @@ function historyDetailText(entry) {
             >
               <img v-if="confirmDialogState.confirmIconUrl" :src="confirmDialogState.confirmIconUrl" alt="" class="button__icon" />
               {{ confirmDialogState.confirmLabel }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- 更新確認彈窗：release notes 是 Markdown，內容長短不定，需要獨立版型（可捲動框框、
+         按鈕列固定在外面），不能沿用上面的通用確認彈窗。 -->
+    <Transition name="modal">
+      <div v-if="isUpdateModalOpen" class="modal-overlay" @click.self="closeUpdateDetailsModal">
+        <div class="modal modal--update">
+          <h2 class="modal__title">{{ t('settings.updateFoundPrompt') }}</h2>
+          <div class="modal--update__body" v-html="renderedReleaseNotes"></div>
+          <div class="modal__footer">
+            <button class="link-button" @click="openReleasesPageAction" type="button" style="margin-right: auto;">
+              {{ t('settings.updateCheckOpenRelease') }}
+            </button>
+            <button class="button button--secondary" @click="closeUpdateDetailsModal" type="button" :disabled="isInstallingUpdate">
+              {{ t('passwordPrompt.cancel') }}
+            </button>
+            <button
+              v-if="updateCheckResult?.hasDownloadUrl"
+              class="button button--primary"
+              @click="installUpdateAction"
+              type="button"
+              :disabled="isInstallingUpdate"
+            >
+              {{ isInstallingUpdate ? t('settings.updateDownloading') : t('settings.updateInstallButton') }}
             </button>
           </div>
         </div>
@@ -1998,6 +2601,10 @@ function historyDetailText(entry) {
               <h3>{{ t('help.criticalActionTitle') }}</h3>
               <p>{{ t('help.criticalActionBody') }}</p>
             </section>
+            <section class="modal--help__section">
+              <h3>{{ t('help.folderGuardTitle') }}</h3>
+              <p>{{ t('help.folderGuardBody') }}</p>
+            </section>
           </div>
           <div class="modal__footer modal__footer--center">
             <button class="button button--primary" @click="isHelpOpen = false" type="button">{{ t('recoveryKeyModal.close') }}</button>
@@ -2039,14 +2646,31 @@ function historyDetailText(entry) {
           <h2 class="modal__title">{{ passwordPromptContext.mode === 'delete' ? t('list.delete') : t('passwordPrompt.title') }}</h2>
           <p v-if="passwordPromptContext.mode === 'delete'" class="modal__subtitle">{{ t('confirm.deletePasswordPrompt', { name: passwordPromptContext.item.originalName }) }}</p>
           <p v-else-if="passwordPromptContext.mode === 'single'" class="modal__subtitle">{{ t('passwordPrompt.unlockSingle', { name: passwordPromptContext.item.originalName }) }}</p>
-          <p v-else class="modal__subtitle">{{ t('passwordPrompt.unlockBatch', { count: passwordPromptContext.group.items.length, preview: batchPreviewText(passwordPromptContext.group.items) }) }}</p>
-          <input
-            ref="passwordPromptInputRef"
-            v-model="passwordPromptValue"
-            type="password"
-            class="text-input"
-            @keyup.enter="submitPasswordPrompt"
-          />
+          <p v-else-if="passwordPromptContext.mode === 'batch'" class="modal__subtitle">{{ t('passwordPrompt.unlockBatch', { count: passwordPromptContext.group.items.length, preview: batchPreviewText(passwordPromptContext.group.items) }) }}</p>
+          <!-- 這三種是資料夾防護用途：密碼欄位輸入的是資料夾防護的共用密碼，不是加密/解密密碼。 -->
+          <p v-else-if="passwordPromptContext.mode === 'folderGuardUnlock'" class="modal__subtitle">{{ t('folderGuard.unlockPasswordPrompt', { path: passwordPromptContext.item.path }) }}</p>
+          <p v-else-if="passwordPromptContext.mode === 'folderGuardUnlockAll'" class="modal__subtitle">{{ t('folderGuard.unlockAllPasswordPrompt') }}</p>
+          <p v-else-if="passwordPromptContext.mode === 'folderGuardNestedEncrypt'" class="modal__subtitle">{{ t('folderGuard.nestedGuardedPasswordPrompt') }}</p>
+          <p v-else-if="passwordPromptContext.mode === 'folderGuardDisable'" class="modal__subtitle">{{ t('folderGuard.disablePasswordPrompt') }}</p>
+          <p v-else-if="passwordPromptContext.mode === 'folderGuardDisablePasskey'" class="modal__subtitle">{{ t('folderGuard.disablePasskeyPasswordPrompt') }}</p>
+          <div class="password-field">
+            <input
+              ref="passwordPromptInputRef"
+              v-model="passwordPromptValue"
+              :type="showPasswordPromptValue ? 'text' : 'password'"
+              class="text-input"
+              @keyup.enter="submitPasswordPrompt"
+            />
+            <button
+              type="button"
+              class="password-field__toggle"
+              :aria-label="t(showPasswordPromptValue ? 'common.hidePassword' : 'common.showPassword')"
+              @click="showPasswordPromptValue = !showPasswordPromptValue"
+            >
+              <svg v-if="showPasswordPromptValue" viewBox="0 0 24 24" fill="none"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="2.75" stroke="currentColor" stroke-width="1.6"/></svg>
+              <svg v-else viewBox="0 0 24 24" fill="none"><path d="M3 3l18 18M9.9 5.1A10.7 10.7 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17.1 17.1 0 0 1-3.15 4.05M6.5 6.9C4.1 8.6 2.5 12 2.5 12s3.5 6.5 9.5 6.5c1.1 0 2.1-.2 3-.55M14.1 14.1a2.75 2.75 0 0 1-3.9-3.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
           <div class="modal__footer">
             <button class="button button--secondary" @click="cancelPasswordPrompt" type="button">{{ t('passwordPrompt.cancel') }}</button>
             <button
@@ -2593,6 +3217,14 @@ textarea.text-input {
 
 .hint-text--indented {
   margin-left: 1.65rem;
+}
+
+/* 資料夾防護頁的「並非加密資料夾」警語：比 danger 淡一階，用來標示「請注意」而不是
+   「出錯了」——沿用既有 --color-danger 當底色，只是不用滿彩度，跟真正的錯誤訊息拉開區隔。 */
+.text-warning-soft {
+  color: var(--color-danger);
+  opacity: 0.8;
+  font-weight: 600;
 }
 
 /* ---- 按鈕：所有可點擊元素都要有按下去的回饋（Emil Kowalski 的設計原則） ---- */
@@ -3236,6 +3868,18 @@ textarea.text-input {
   justify-content: flex-start;
 }
 
+/* 資料夾防護清單每列操作欄只有一顆按鈕，不是疊多顆的清單，文字該置中，
+   蓋掉上面給「疊多顆按鈕」情境用的靠左對齊。 */
+.table--folder-guard .table__actions .button {
+  justify-content: center;
+}
+
+/* 按鈕本身的 padding 比純文字儲存格深，文字位置本來就比較低，這裡把左側
+   路徑／狀態欄文字稍微往下移，跟右側按鈕裡文字的垂直位置對齊。 */
+.table--folder-guard td:not(:last-child) {
+  padding-top: 1rem;
+}
+
 .table__actions .link-button {
   text-align: right;
   padding-top: 0.15rem;
@@ -3611,6 +4255,51 @@ textarea.text-input {
   overflow-y: auto;
   margin: 0.5rem -0.5rem 0;
   padding: 0 0.5rem;
+}
+
+.modal--update {
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  max-height: min(600px, 80vh);
+}
+
+.modal--update__body {
+  overflow-y: auto;
+  margin: 0.5rem -0.5rem 1rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+}
+
+/* v-html 注入的 Markdown 內容目前全站沒有對應樣式，這裡補最小必要的排版，避免標題/清單/程式碼
+   區塊看起來完全沒有層次。 */
+.modal--update__body :where(h1, h2, h3) {
+  margin: 0.75rem 0 0.4rem;
+  font-size: 1rem;
+  font-weight: 600;
+}
+.modal--update__body :where(h1, h2, h3):first-child {
+  margin-top: 0;
+}
+.modal--update__body p {
+  margin: 0.5rem 0;
+}
+.modal--update__body ul,
+.modal--update__body ol {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+}
+.modal--update__body code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: rgba(127, 127, 127, 0.18);
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+}
+.modal--update__body a {
+  color: var(--color-accent);
 }
 
 .modal--help__section {

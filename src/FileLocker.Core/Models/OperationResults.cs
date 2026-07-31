@@ -31,3 +31,12 @@ public record VerifyPasswordResult(bool Success, string? ErrorMessage = null, st
 /// 這是設計上刻意的取捨（完整掃描成本太高、也不一定找得到）。
 /// </summary>
 public record MarkerStatus(bool Found, string? MarkerPath, string? Message, string? Code = null, string? Detail = null, string? ConflictingUuid = null);
+
+/// <summary>
+/// 對應「資料夾防護」上鎖操作的結果——跟 LockResult 不同，這裡沒有 Uuid／LockedMarkerPath，
+/// 因為資料夾防護不搬動內容、不產生指標檔，純粹是 ACL 拒絕規則有沒有套用成功。
+/// </summary>
+public record FolderGuardResult(bool Success, string? ErrorMessage = null, string? ErrorCode = null, string? ErrorDetail = null);
+
+/// <summary>對應「資料夾防護」解鎖／憑證驗證的結果，形狀比照 VerifyPasswordResult。</summary>
+public record FolderGuardUnlockResult(bool Success, string? ErrorMessage = null, string? ErrorCode = null, string? ErrorDetail = null);

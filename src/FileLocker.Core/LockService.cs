@@ -18,16 +18,23 @@ public class LockService
     private readonly VaultManager _vault;
     private readonly HistoryLogger? _history;
     private readonly LockoutTracker? _lockout;
+    private readonly Func<IReadOnlyList<string>>? _getGuardedFolderPaths;
 
     /// <summary>
     /// historyLogger／lockoutTracker 都是選填的：CLI 原型或單元測試不一定需要，傳 null 就單純不記錄／不鎖定，
-    /// 不影響加密/解密本身的行為。
+    /// 不影響加密/解密本身的行為。getGuardedFolderPaths 同樣選填——用一個委派而不是直接依賴
+    /// FolderGuardService 型別，讓 LockService 不需要知道資料夾防護子系統的存在，只在有傳入時
+    /// 才做巢狀防護資料夾的檢查（見 EncryptAsync）；傳 null 就完全略過這個檢查，維持既有呼叫端
+    /// （Cli、既有測試）不用跟著改動。
     /// </summary>
-    public LockService(VaultManager vault, HistoryLogger? historyLogger = null, LockoutTracker? lockoutTracker = null)
+    public LockService(
+        VaultManager vault, HistoryLogger? historyLogger = null, LockoutTracker? lockoutTracker = null,
+        Func<IReadOnlyList<string>>? getGuardedFolderPaths = null)
     {
         _vault = vault;
         _history = historyLogger;
         _lockout = lockoutTracker;
+        _getGuardedFolderPaths = getGuardedFolderPaths;
     }
 
     /// <summary>
@@ -63,6 +70,22 @@ public class LockService
         if (File.Exists(markerPath))
         {
             return new LockResult(false, "", "", $"目標位置已經有一個指標檔了：{markerPath}", ErrorCode: ErrorCodes.MarkerAlreadyExists, ErrorDetail: markerPath);
+        }
+
+        // 資料夾防護的 ACL 拒絕規則掛在目前登入帳號的 SID 上，這個行程本身也是用同一個帳號跑，
+        // 讀取防護中的子資料夾一樣會被拒絕存取——同一個理由，這裡也要先做這個便宜的檢查，
+        // 不要等 EncryptToVault 壓縮到一半才撞見 UnauthorizedAccessException（見規劃文件第 8 節）。
+        if (isFolder && _getGuardedFolderPaths is not null)
+        {
+            var nestedGuarded = FolderArchiver.FindNestedGuardedFolders(path, _getGuardedFolderPaths());
+            if (nestedGuarded.Count > 0)
+            {
+                var names = string.Join("、", nestedGuarded.Select(p =>
+                    Path.GetFileName(p.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))));
+                return new LockResult(false, "", "",
+                    $"這個資料夾內含正在上鎖的項目（子資料夾：{names}），請先解鎖才能加密",
+                    ErrorCode: ErrorCodes.FolderGuardContainsNestedGuarded, ErrorDetail: string.Join("|", nestedGuarded));
+            }
         }
 
         EncryptionResult encryptResult;

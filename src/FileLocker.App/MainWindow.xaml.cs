@@ -1,12 +1,16 @@
-﻿using System.IO;
+﻿using System.Diagnostics;
+using System.IO;
+using System.Net.Http;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Interop;
 using FileLocker.Core;
+using FileLocker.Core.FolderGuard;
 using FileLocker.Core.History;
 using FileLocker.Core.Models;
 using FileLocker.Core.Protocol;
 using FileLocker.Core.Settings;
+using FileLocker.Core.UpdateCheck;
 using FileLocker.Core.Vault;
 using Microsoft.Web.WebView2.Core;
 
@@ -18,6 +22,9 @@ public partial class MainWindow : Window
     // 不是真的網域，不需要真的擁有或註冊這個名稱。
     private const string AppOrigin = "filelocker.local";
 
+    // 軟體更新檢查專用，整個 App 只有這一個用途，不用另外開 DI 容器。
+    private static readonly HttpClient s_updateCheckHttpClient = new();
+
     // 無邊框視窗的 Win32/DWM 互操作跟視窗外框相關邏輯搬到 MainWindow.Chrome.cs 了（見該檔案
     // 開頭說明）——這裡只留 WebView2 初始化／IPC 派送／Vault 協定呼叫。
 
@@ -28,25 +35,32 @@ public partial class MainWindow : Window
     private readonly AppSettings _settings;
     private readonly VaultChangeWatcher _vaultChangeWatcher;
     private readonly VaultProtocolHandlers _protocolHandlers;
+    private readonly FolderGuardService _folderGuardService;
     private readonly List<string>? _initialPaths;
+    private readonly string? _initialAction;
 
     /// <summary>
     /// VaultManager／LockService 現在由 App.xaml.cs 統一建立、傳進來——這樣主視窗跟密碼小視窗
     /// 用的是同一份 Vault／History 設定，不會各自重複建立、路徑卻可能不小心兜不起來。
     /// initialPaths 是從 Shell Extension 右鍵選單過來的（可能是空的、一個，或多個路徑），
     /// 等 WebView2 頁面真的載入完成才送給前端，避免前端還沒掛上訊息監聽器就漏接。
+    /// folderGuardService 是平行、獨立於 Vault/加密的子系統（見規劃文件），刻意不塞進
+    /// VaultProtocolHandlers——那一層現在專責 Vault/加密，資料夾防護走自己獨立的 Handle* 方法。
     /// </summary>
     public MainWindow(
         VaultManager vaultManager, HistoryLogger historyLogger, LockService lockService,
         AppSettingsManager settingsManager, AppSettings settings, string appDataDir,
         VaultIndexCache vaultIndexCache, VaultChangeWatcher vaultChangeWatcher,
-        List<string>? initialPaths = null)
+        FolderGuardService folderGuardService,
+        List<string>? initialPaths = null, string? initialAction = null)
     {
         InitializeComponent();
 
         _settings = settings;
         _vaultChangeWatcher = vaultChangeWatcher;
+        _folderGuardService = folderGuardService;
         _initialPaths = initialPaths;
+        _initialAction = initialAction;
 
         // 協定分派層（見架構審查 2026-07-26）：純 C#、不依賴 WPF/WebView2，直接組裝既有的
         // Core 依賴即可，不需要 App.xaml.cs 額外建立、也不改動它呼叫 MainWindow 建構子的簽章。
@@ -182,7 +196,10 @@ public partial class MainWindow : Window
 
                 if (_initialPaths is { Count: > 0 })
                 {
-                    SendToFrontend(new { type = "initialPaths", paths = _initialPaths });
+                    // action 讓前端知道要切去哪個分頁：無值或 "encrypt" 維持既有行為（加密分頁）；
+                    // "folderGuardSetup" 是右鍵「上鎖」但整個功能還沒設定過共用密碼時的引導路徑
+                    // （見 App.xaml.cs HandleLaunchArgs 對 --folder-guard-lock 旗標的處理）。
+                    SendToFrontend(new { type = "initialPaths", paths = _initialPaths, action = _initialAction });
                 }
             };
 
@@ -195,7 +212,7 @@ public partial class MainWindow : Window
     /// 轉送過來的加密路徑清單就送進這裡，而不是另外開一個新的 MainWindow。
     /// 順便把視窗搶回前景（可能被壓在其他視窗底下，或被縮到最小），讓使用者知道有新的東西進來了。
     /// </summary>
-    public void ApplyIncomingPaths(List<string> paths)
+    public void ApplyIncomingPaths(List<string> paths, string? action = null)
     {
         Activate();
         if (WindowState == WindowState.Minimized)
@@ -205,7 +222,7 @@ public partial class MainWindow : Window
 
         if (paths.Count > 0)
         {
-            SendToFrontend(new { type = "initialPaths", paths });
+            SendToFrontend(new { type = "initialPaths", paths, action });
         }
     }
 
@@ -329,6 +346,62 @@ public partial class MainWindow : Window
 
                 case "verifyPasswordForDelete":
                     await HandleVerifyPasswordForDeleteRequestAsync(root);
+                    break;
+
+                case "lockFolders":
+                    await HandleLockFoldersRequestAsync(root);
+                    break;
+
+                case "unlockFolder":
+                    await HandleUnlockFolderRequestAsync(root);
+                    break;
+
+                case "unlockAllFolders":
+                    await HandleUnlockAllFoldersRequestAsync(root);
+                    break;
+
+                case "listFolderGuard":
+                    await HandleListFolderGuardRequestAsync();
+                    break;
+
+                case "removeFolderGuardEntry":
+                    await HandleRemoveFolderGuardEntryRequestAsync(root);
+                    break;
+
+                case "setupFolderGuardCredential":
+                    await HandleSetupFolderGuardCredentialRequestAsync(root);
+                    break;
+
+                case "setupFolderGuardPasskey":
+                    await HandleSetupFolderGuardPasskeyRequestAsync();
+                    break;
+
+                case "disableFolderGuardPasskey":
+                    await HandleDisableFolderGuardPasskeyRequestAsync(root);
+                    break;
+
+                case "disableFolderGuard":
+                    await HandleDisableFolderGuardRequestAsync(root);
+                    break;
+
+                case "openFolderInExplorer":
+                    HandleOpenFolderInExplorer(root);
+                    break;
+
+                case "checkForUpdates":
+                    await HandleCheckForUpdatesRequestAsync();
+                    break;
+
+                case "downloadAndInstallUpdate":
+                    await HandleDownloadAndInstallUpdateRequestAsync();
+                    break;
+
+                case "openReleasesPage":
+                    Process.Start(new ProcessStartInfo { FileName = "https://github.com/Lai-xuan/FileLocker/releases", UseShellExecute = true });
+                    break;
+
+                case "unlockFoldersForEncryption":
+                    await HandleUnlockFoldersForEncryptionRequestAsync(root);
                     break;
 
                 default:
@@ -779,6 +852,301 @@ public partial class MainWindow : Window
         {
             type = "verifyPasswordForDeleteResult",
             uuid,
+            result.Success,
+            result.ErrorMessage,
+            result.ErrorCode,
+            result.ErrorDetail
+        });
+    }
+
+    // ---- 資料夾防護（Folder Guard）：見 FileLocker_資料夾防護_功能規劃.md。獨立於 Vault/加密的
+    // 平行子系統，這裡直接呼叫 _folderGuardService，不透過 VaultProtocolHandlers。 ----
+
+    private async Task HandleLockFoldersRequestAsync(JsonElement request)
+    {
+        var paths = request.GetProperty("paths").EnumerateArray()
+            .Select(p => p.GetString() ?? "")
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .ToList();
+
+        var results = await _folderGuardService.LockFoldersAsync(paths);
+
+        SendToFrontend(new
+        {
+            type = "lockFoldersResult",
+            items = paths.Zip(results, (path, result) => new
+            {
+                path,
+                result.Success,
+                result.ErrorMessage,
+                result.ErrorCode,
+                result.ErrorDetail
+            })
+        });
+    }
+
+    private async Task HandleUnlockFolderRequestAsync(JsonElement request)
+    {
+        var path = request.GetProperty("path").GetString() ?? "";
+        var password = request.TryGetProperty("password", out var passwordProp) ? passwordProp.GetString() : null;
+        var keepInListAsUnlocked = request.TryGetProperty("keepInListAsUnlocked", out var keepProp) && keepProp.GetBoolean();
+        var hwnd = new WindowInteropHelper(this).Handle;
+
+        var result = await _folderGuardService.UnlockFolderAsync(path, password, hwnd, keepInListAsUnlocked);
+
+        SendToFrontend(new
+        {
+            type = "unlockFolderResult",
+            path,
+            result.Success,
+            result.ErrorMessage,
+            result.ErrorCode,
+            result.ErrorDetail
+        });
+    }
+
+    private async Task HandleUnlockAllFoldersRequestAsync(JsonElement request)
+    {
+        var password = request.TryGetProperty("password", out var passwordProp) ? passwordProp.GetString() : null;
+        var hwnd = new WindowInteropHelper(this).Handle;
+
+        var result = await _folderGuardService.UnlockAllAsync(password, hwnd);
+
+        SendToFrontend(new
+        {
+            type = "unlockAllFoldersResult",
+            result.Success,
+            result.ErrorMessage,
+            result.ErrorCode,
+            result.ErrorDetail
+        });
+    }
+
+    private async Task HandleListFolderGuardRequestAsync()
+    {
+        var entries = await _folderGuardService.ListAsync();
+
+        SendToFrontend(new
+        {
+            type = "folderGuardListResult",
+            configured = _folderGuardService.IsConfigured,
+            passkeyEnabled = _folderGuardService.IsPasskeyEnabled,
+            items = entries.Select(e => new
+            {
+                e.Path,
+                status = e.Status.ToString(),
+                e.LockedAtUtc,
+                e.UnlockedAtUtc
+            })
+        });
+    }
+
+    private async Task HandleRemoveFolderGuardEntryRequestAsync(JsonElement request)
+    {
+        var path = request.GetProperty("path").GetString() ?? "";
+        await _folderGuardService.RemoveFromListAsync(path);
+        SendToFrontend(new { type = "removeFolderGuardEntryResult", success = true, path });
+    }
+
+    private async Task HandleSetupFolderGuardCredentialRequestAsync(JsonElement request)
+    {
+        var password = request.GetProperty("password").GetString() ?? "";
+        await _folderGuardService.SetupCredentialAsync(password);
+        SendToFrontend(new { type = "setupFolderGuardCredentialResult", success = true });
+    }
+
+    private async Task HandleSetupFolderGuardPasskeyRequestAsync()
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+        var success = await _folderGuardService.SetupPasskeyAsync(hwnd);
+        SendToFrontend(new { type = "setupFolderGuardPasskeyResult", success });
+    }
+
+    private static void HandleOpenFolderInExplorer(JsonElement request)
+    {
+        var path = request.GetProperty("path").GetString() ?? "";
+        Process.Start(new ProcessStartInfo { FileName = "explorer.exe", Arguments = $"\"{path}\"", UseShellExecute = true });
+    }
+
+    /// <summary>installer_config.json 是 mac-style-windows-installer 安裝時放進安裝資料夾的，
+    /// 跟 FileLocker.App.exe 同一層——開發環境用 dotnet run 執行時不會有這個檔案，屬於正常情況，
+    /// 不是錯誤。</summary>
+    private static string? ReadInstalledVersion()
+    {
+        var configPath = Path.Combine(AppContext.BaseDirectory, "installer_config.json");
+        if (!File.Exists(configPath))
+        {
+            return null;
+        }
+        try
+        {
+            var json = File.ReadAllText(configPath);
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.GetProperty("version").GetString();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>查 GitHub 最新 release：tag、更新內容（release 的 body 欄位）、安裝檔下載連結
+    /// （assets 裡副檔名是 .exe 的那個）。downloadUrl 每次都重新查、不快取、不讓前端傳回來——
+    /// 前端只被允許「知道有沒有下載連結」，實際網址由後端自己決定，避免前端能左右下載目標。</summary>
+    private async Task<(string? Tag, string? ReleaseNotes, string? DownloadUrl)> FetchLatestGitHubReleaseAsync()
+    {
+        s_updateCheckHttpClient.DefaultRequestHeaders.UserAgent.ParseAdd("FileLocker-UpdateCheck");
+        var response = await s_updateCheckHttpClient.GetAsync("https://api.github.com/repos/Lai-xuan/FileLocker/releases/latest");
+        if (!response.IsSuccessStatusCode)
+        {
+            return (null, null, null);
+        }
+
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var tag = doc.RootElement.GetProperty("tag_name").GetString();
+        var releaseNotes = doc.RootElement.TryGetProperty("body", out var bodyProp) ? bodyProp.GetString() : null;
+
+        string? downloadUrl = null;
+        if (doc.RootElement.TryGetProperty("assets", out var assets))
+        {
+            foreach (var asset in assets.EnumerateArray())
+            {
+                var name = asset.GetProperty("name").GetString() ?? "";
+                if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                {
+                    downloadUrl = asset.GetProperty("browser_download_url").GetString();
+                    break;
+                }
+            }
+        }
+        return (tag, releaseNotes, downloadUrl);
+    }
+
+    private async Task HandleCheckForUpdatesRequestAsync()
+    {
+        var currentVersion = ReadInstalledVersion();
+        if (currentVersion is null)
+        {
+            SendToFrontend(new { type = "checkForUpdatesResult", success = false, errorCode = ErrorCodes.UpdateCheckNotInstalled });
+            return;
+        }
+
+        try
+        {
+            var (latestTag, releaseNotes, downloadUrl) = await FetchLatestGitHubReleaseAsync();
+            if (latestTag is null)
+            {
+                SendToFrontend(new { type = "checkForUpdatesResult", success = false, errorCode = ErrorCodes.UpdateCheckFailed });
+                return;
+            }
+
+            SendToFrontend(new
+            {
+                type = "checkForUpdatesResult",
+                success = true,
+                currentVersion,
+                latestVersion = latestTag,
+                updateAvailable = VersionComparer.IsNewerVersionAvailable(currentVersion, latestTag),
+                releaseNotes,
+                hasDownloadUrl = downloadUrl is not null
+            });
+        }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException or TaskCanceledException)
+        {
+            SendToFrontend(new { type = "checkForUpdatesResult", success = false, errorCode = ErrorCodes.UpdateCheckFailed });
+        }
+    }
+
+    /// <summary>下載安裝檔到暫存資料夾、啟動它（UseShellExecute=true，安裝程式自己的 manifest
+    /// 會觸發 UAC 提權，這裡不用特別做什麼），確認安裝程式真的啟動成功才關閉本體——先關本體
+    /// 再嘗試啟動安裝程式的話，萬一啟動失敗（例如被防毒攔截）使用者就完全沒有退路了；反過來，
+    /// 啟動成功後不關閉本體，安裝程式清空/覆蓋目標資料夾會因為 FileLocker.App.exe 還在跑、
+    /// 檔案被鎖住而失敗，所以順序很重要。</summary>
+    private async Task HandleDownloadAndInstallUpdateRequestAsync()
+    {
+        try
+        {
+            var (_, _, downloadUrl) = await FetchLatestGitHubReleaseAsync();
+            if (downloadUrl is null)
+            {
+                SendToFrontend(new { type = "downloadAndInstallUpdateResult", success = false, errorCode = ErrorCodes.UpdateDownloadFailed });
+                return;
+            }
+
+            var fileName = Path.GetFileName(new Uri(downloadUrl).LocalPath);
+            var installerPath = Path.Combine(Path.GetTempPath(), fileName);
+
+            using var response = await s_updateCheckHttpClient.GetAsync(downloadUrl);
+            response.EnsureSuccessStatusCode();
+            await using (var fileStream = File.Create(installerPath))
+            {
+                await response.Content.CopyToAsync(fileStream);
+            }
+
+            Process.Start(new ProcessStartInfo { FileName = installerPath, UseShellExecute = true });
+
+            SendToFrontend(new { type = "downloadAndInstallUpdateResult", success = true });
+            Application.Current.Shutdown();
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or TaskCanceledException or System.ComponentModel.Win32Exception)
+        {
+            SendToFrontend(new { type = "downloadAndInstallUpdateResult", success = false, errorCode = ErrorCodes.UpdateDownloadFailed });
+        }
+    }
+
+    private async Task HandleDisableFolderGuardPasskeyRequestAsync(JsonElement request)
+    {
+        var password = request.TryGetProperty("password", out var passwordProp) ? passwordProp.GetString() : null;
+        var hwnd = new WindowInteropHelper(this).Handle;
+
+        var result = await _folderGuardService.DisablePasskeyAsync(password, hwnd);
+
+        SendToFrontend(new
+        {
+            type = "disableFolderGuardPasskeyResult",
+            result.Success,
+            result.ErrorMessage,
+            result.ErrorCode,
+            result.ErrorDetail
+        });
+    }
+
+    private async Task HandleDisableFolderGuardRequestAsync(JsonElement request)
+    {
+        var password = request.TryGetProperty("password", out var passwordProp) ? passwordProp.GetString() : null;
+        var hwnd = new WindowInteropHelper(this).Handle;
+
+        var result = await _folderGuardService.DisableAsync(password, hwnd);
+
+        SendToFrontend(new
+        {
+            type = "disableFolderGuardResult",
+            result.Success,
+            result.ErrorMessage,
+            result.ErrorCode,
+            result.ErrorDetail
+        });
+    }
+
+    /// <summary>對應規劃文件第 8 節：加密流程掃描到巢狀防護中的資料夾而中止（見 LockService.EncryptAsync
+    /// 的 FolderGuardContainsNestedGuarded 錯誤碼）時，前端跳彈窗列出這些子資料夾，使用者確認後
+    /// 呼叫這裡解鎖（不留清單記錄，見 UnlockForEncryptionAsync 說明），前端收到成功結果後要自己
+    /// 重新送一次原本的 encrypt 請求——這裡只負責解鎖，不負責重試加密。</summary>
+    private async Task HandleUnlockFoldersForEncryptionRequestAsync(JsonElement request)
+    {
+        var paths = request.GetProperty("paths").EnumerateArray()
+            .Select(p => p.GetString() ?? "")
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .ToList();
+        var password = request.TryGetProperty("password", out var passwordProp) ? passwordProp.GetString() : null;
+        var hwnd = new WindowInteropHelper(this).Handle;
+
+        var result = await _folderGuardService.UnlockForEncryptionAsync(paths, password, hwnd);
+
+        SendToFrontend(new
+        {
+            type = "unlockFoldersForEncryptionResult",
             result.Success,
             result.ErrorMessage,
             result.ErrorCode,

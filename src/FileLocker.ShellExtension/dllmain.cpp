@@ -104,6 +104,15 @@ static const wchar_t* GetContextMenuLabel()
     return IsSystemUiChinese() ? L"使用 FileLocker 加密" : L"Encrypt with FileLocker";
 }
 
+/// <summary>
+/// 對應「資料夾防護」規劃文件第 5 節：純 ACL 存取限制，不加密，跟上面的加密選單是完全不同的
+/// 命令 id（見 QueryContextMenu／InvokeCommand），只在選取的項目全部是資料夾時才會被插入。
+/// </summary>
+static const wchar_t* GetLockFolderMenuLabel()
+{
+    return IsSystemUiChinese() ? L"將所選資料夾上鎖" : L"Lock Selected Folders";
+}
+
 // ---- 這一版加上 IShellExtInit（接收使用者選了哪些檔案）跟 IContextMenu（顯示選單、處理點擊）----
 class FileLockerShellExtClass : public IShellExtInit, public IContextMenu
 {
@@ -182,6 +191,20 @@ public:
         GlobalUnlock(stg.hGlobal);
         ReleaseStgMedium(&stg);
 
+        // 「將所選資料夾上鎖」選單項目只在選取的項目全部是資料夾時才出現（見 QueryContextMenu）——
+        // 資料夾防護 v1 不支援單一檔案，混到任何一個檔案就不顯示這個選項，不做「自動忽略檔案」
+        // 這種容易讓使用者誤以為全部項目都被處理到的隱性行為（見規劃文件第 5 節）。
+        m_allSelectedAreFolders = !m_selectedFiles.empty();
+        for (const auto& path : m_selectedFiles)
+        {
+            DWORD attributes = GetFileAttributesW(path.c_str());
+            if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY))
+            {
+                m_allSelectedAreFolders = false;
+                break;
+            }
+        }
+
         return S_OK;
     }
 
@@ -193,10 +216,17 @@ public:
             return MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_NULL, 0);
         }
 
-        InsertMenuW(hMenu, indexMenu, MF_BYPOSITION | MF_STRING, idCmdFirst, GetContextMenuLabel());
+        InsertMenuW(hMenu, indexMenu, MF_BYPOSITION | MF_STRING, idCmdFirst + 0, GetContextMenuLabel());
 
-        // 回傳值代表我們加了幾個命令 id（這裡只加了一個），Explorer 靠這個數字知道下一個外掛可以從哪個 id 開始用。
-        return MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_NULL, 1);
+        UINT commandCount = 1;
+        if (m_allSelectedAreFolders)
+        {
+            InsertMenuW(hMenu, indexMenu + 1, MF_BYPOSITION | MF_STRING, idCmdFirst + 1, GetLockFolderMenuLabel());
+            commandCount = 2;
+        }
+
+        // 回傳值代表我們加了幾個命令 id，Explorer 靠這個數字知道下一個外掛可以從哪個 id 開始用。
+        return MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_NULL, commandCount);
     }
 
     STDMETHODIMP InvokeCommand(LPCMINVOKECOMMANDINFO pici) override
@@ -206,10 +236,15 @@ public:
         {
             return E_INVALIDARG;
         }
-        if (LOWORD(pici->lpVerb) != 0)
+
+        // command 0 = 加密（既有行為，不帶任何旗標）；command 1 = 資料夾防護上鎖，帶
+        // --folder-guard-lock 旗標讓 App 端（App.xaml.cs HandleLaunchArgs）分辨這次啟動要做什麼。
+        UINT commandId = LOWORD(pici->lpVerb);
+        if (commandId > 1)
         {
             return E_INVALIDARG;
         }
+        const wchar_t* extraArgPrefix = (commandId == 1) ? L" --folder-guard-lock" : L"";
 
         if (m_selectedFiles.empty())
         {
@@ -258,11 +293,11 @@ public:
             }
             CloseHandle(hFile);
 
-            commandLine = QuoteArgument(appPath) + L" " + QuoteArgument(L"@" + std::wstring(tempFileName));
+            commandLine = QuoteArgument(appPath) + extraArgPrefix + L" " + QuoteArgument(L"@" + std::wstring(tempFileName));
         }
         else
         {
-            commandLine = QuoteArgument(appPath);
+            commandLine = QuoteArgument(appPath) + extraArgPrefix;
             for (const auto& path : m_selectedFiles)
             {
                 commandLine += L" " + QuoteArgument(path);
@@ -288,13 +323,23 @@ public:
         return S_OK;
     }
 
-    STDMETHODIMP GetCommandString(UINT_PTR /*idCmd*/, UINT uFlags, UINT* /*pReserved*/, LPSTR pszName, UINT cchMax) override
+    STDMETHODIMP GetCommandString(UINT_PTR idCmd, UINT uFlags, UINT* /*pReserved*/, LPSTR pszName, UINT cchMax) override
     {
         if (uFlags == GCS_HELPTEXTW)
         {
-            const wchar_t* helpText = IsSystemUiChinese()
-                ? L"用 FileLocker 加密選取的項目"
-                : L"Encrypt the selected items with FileLocker";
+            const wchar_t* helpText;
+            if (idCmd == 1)
+            {
+                helpText = IsSystemUiChinese()
+                    ? L"限制存取此資料夾，不加密內容"
+                    : L"Restrict access to this folder without encrypting it";
+            }
+            else
+            {
+                helpText = IsSystemUiChinese()
+                    ? L"用 FileLocker 加密選取的項目"
+                    : L"Encrypt the selected items with FileLocker";
+            }
             StringCchCopyW(reinterpret_cast<LPWSTR>(pszName), cchMax, helpText);
             return S_OK;
         }
@@ -305,6 +350,7 @@ private:
     ~FileLockerShellExtClass() { InterlockedDecrement(&g_cDllRef); }
     long m_cRef;
     std::vector<std::wstring> m_selectedFiles;
+    bool m_allSelectedAreFolders = false;
 };
 
 // ---- Class Factory：COM 標準機制，負責「生出」上面那個類別的實體 ----

@@ -72,4 +72,34 @@ public class FolderArchiverTests : IDisposable
 
         Assert.Empty(found);
     }
+
+    [Fact]
+    public void FindNestedGuardedFolders_GuardedPathInsideTree_IsFound()
+    {
+        var subDir = Directory.CreateDirectory(Path.Combine(_sourceDir.FullName, "subfolder"));
+        var guardedPaths = new[] { subDir.FullName, @"C:\完全不相關的路徑" };
+
+        var found = FolderArchiver.FindNestedGuardedFolders(_sourceDir.FullName, guardedPaths);
+
+        Assert.Single(found);
+        Assert.Equal(subDir.FullName, found[0]);
+    }
+
+    [Fact]
+    public void FindNestedGuardedFolders_TheFolderItselfIsGuarded_IsNotIncluded()
+    {
+        // 要加密的資料夾本身如果就是防護中的資料夾，那是另一個情境（加密流程自己就會因為讀不到
+        // 內容而失敗），不算是「巢狀」——這個方法只回報「裡面」的防護資料夾。
+        var found = FolderArchiver.FindNestedGuardedFolders(_sourceDir.FullName, new[] { _sourceDir.FullName });
+
+        Assert.Empty(found);
+    }
+
+    [Fact]
+    public void FindNestedGuardedFolders_NoGuardedPaths_ReturnsEmpty()
+    {
+        var found = FolderArchiver.FindNestedGuardedFolders(_sourceDir.FullName, Array.Empty<string>());
+
+        Assert.Empty(found);
+    }
 }

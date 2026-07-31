@@ -49,4 +49,20 @@ public static class ErrorCodes
     public const string VaultMoveDestinationNotEmpty = "VAULT_MOVE_DESTINATION_NOT_EMPTY";
     public const string VaultMoveIoError = "VAULT_MOVE_IO_ERROR";
     public const string RecoveryKeySaveError = "RECOVERY_KEY_SAVE_ERROR";
+
+    // 對應「資料夾防護」（Folder Guard）：純 ACL 存取限制，不加密，見 FileLocker_資料夾防護_功能規劃.md。
+    public const string FolderGuardNotConfigured = "FOLDER_GUARD_NOT_CONFIGURED";
+    public const string FolderGuardPasswordIncorrect = "FOLDER_GUARD_PASSWORD_INCORRECT";
+    public const string FolderGuardPasskeyFailed = "FOLDER_GUARD_PASSKEY_FAILED";
+    public const string FolderGuardLockedOut = "FOLDER_GUARD_LOCKED_OUT";
+    public const string FolderGuardAclApplyFailed = "FOLDER_GUARD_ACL_APPLY_FAILED";
+    public const string FolderGuardAclRemoveFailed = "FOLDER_GUARD_ACL_REMOVE_FAILED";
+    public const string FolderGuardAlreadyLocked = "FOLDER_GUARD_ALREADY_LOCKED";
+    public const string FolderGuardPathNotFolder = "FOLDER_GUARD_PATH_NOT_FOLDER";
+    public const string FolderGuardContainsNestedGuarded = "FOLDER_GUARD_CONTAINS_NESTED_GUARDED";
+
+    // 對應軟體更新檢查（installer_config.json 版本比對 GitHub release）。
+    public const string UpdateCheckNotInstalled = "UPDATE_CHECK_NOT_INSTALLED";
+    public const string UpdateCheckFailed = "UPDATE_CHECK_FAILED";
+    public const string UpdateDownloadFailed = "UPDATE_DOWNLOAD_FAILED";
 }

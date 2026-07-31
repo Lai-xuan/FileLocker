@@ -34,6 +34,31 @@ public class LockServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task EncryptAsync_FolderContainingGuardedSubfolder_ReturnsNestedGuardedError()
+    {
+        var folderPath = Path.Combine(_workDir.FullName, "要加密的資料夾");
+        Directory.CreateDirectory(folderPath);
+        var guardedSubPath = Path.Combine(folderPath, "防護中的子資料夾");
+        Directory.CreateDirectory(guardedSubPath);
+        File.WriteAllText(Path.Combine(folderPath, "普通檔案.txt"), "內容");
+
+        // 對應規劃文件第 8 節：不需要真的套用 ACL 就能測到這條路徑——getGuardedFolderPaths
+        // 只是告訴 LockService「目前有哪些路徑正在防護中」，真正的 ACL 阻擋行為屬於
+        // FolderGuardAcl／FolderGuardService 自己的職責，這裡只驗證 LockService 收到
+        // 巢狀防護清單後會正確中止並回報，不會讓 UnauthorizedAccessException 裸奔出去。
+        var serviceWithGuard = new LockService(
+            new VaultManager(_vaultDir.FullName), _history, _lockout,
+            getGuardedFolderPaths: () => new[] { guardedSubPath });
+
+        var result = await serviceWithGuard.EncryptAsync(folderPath, "correct-password", null);
+
+        Assert.False(result.Success);
+        Assert.Equal(ErrorCodes.FolderGuardContainsNestedGuarded, result.ErrorCode);
+        Assert.Contains("防護中的子資料夾", result.ErrorMessage);
+        Assert.True(Directory.Exists(folderPath)); // 中止在壓縮之前，原始資料夾要維持完整不動
+    }
+
+    [Fact]
     public async Task EncryptAsync_SingleFile_RemovesOriginalAndCreatesMarker()
     {
         var filePath = Path.Combine(_workDir.FullName, "秘密文件.txt");

@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Windows;
 using FileLocker.Core;
+using FileLocker.Core.FolderGuard;
 using FileLocker.Core.History;
 using FileLocker.Core.Security;
 using FileLocker.Core.Settings;
@@ -33,6 +34,7 @@ public partial class App : Application
     private string? _appDataDir;
     private VaultIndexCache? _vaultIndexCache;
     private VaultChangeWatcher? _vaultChangeWatcher;
+    private FolderGuardService? _folderGuardService;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -75,7 +77,24 @@ public partial class App : Application
         _vaultManager = new VaultManager(settings.VaultPath);
         _historyLogger = new HistoryLogger(Path.Combine(appDataDir, "history.jsonl"));
         var lockoutTracker = new LockoutTracker(Path.Combine(appDataDir, "lockout.json"));
-        _lockService = new LockService(_vaultManager, _historyLogger, lockoutTracker);
+
+        // 資料夾防護（Folder Guard）：獨立於 Vault 之外的本機儲存，見規劃文件第 11 節。
+        // 憑證與清單存在自己的資料夾，鎖定狀態也用自己獨立的檔案（folder-guard-unlock 這個
+        // 鍵值代表整個共用密碼，不是像加密那樣每個項目各自一把，見規劃文件第 3 節）。
+        var folderGuardDir = Path.Combine(appDataDir, "FolderGuard");
+        Directory.CreateDirectory(folderGuardDir);
+        var folderGuardStore = new FolderGuardStore(Path.Combine(folderGuardDir, "guarded-folders.json"));
+        var folderGuardLockout = new LockoutTracker(Path.Combine(folderGuardDir, "lockout.json"));
+        _folderGuardService = new FolderGuardService(folderGuardStore, folderGuardLockout);
+
+        // LockService 透過這個委派得知目前有哪些資料夾正在防護中，用來在加密流程一開始就擋下
+        // 內含巢狀防護資料夾的情況（見 LockService.EncryptAsync、規劃文件第 8 節）——LockService
+        // 本身不需要知道 FolderGuardService／FolderGuardStore 型別的存在，只吃這個委派。
+        _lockService = new LockService(_vaultManager, _historyLogger, lockoutTracker,
+            getGuardedFolderPaths: () => folderGuardStore.ListWithSelfHeal()
+                .Where(entry => entry.Status == FolderGuardStatus.Locked)
+                .Select(entry => entry.Path)
+                .ToList());
         _settingsManager = settingsManager;
         _settings = settings;
         _appDataDir = appDataDir;
@@ -122,6 +141,11 @@ public partial class App : Application
     /// 都走這個方法，行為完全一致——這是「單一執行個體」機制的核心：外部看起來像是
     /// 開了一支新的 FileLocker，實際上都是同一支行程在處理。
     /// </summary>
+    // Shell Extension 右鍵「上鎖」命令列旗標（見 dllmain.cpp InvokeCommand），跟現有的「直接傳路徑
+    // ＝加密」預設行為區隔開——資料夾防護是完全不同的操作，不能讓 Shell Extension 傳來的路徑
+    // 預設被當成要加密的東西。
+    private const string FolderGuardLockArgFlag = "--folder-guard-lock";
+
     private void HandleLaunchArgs(string[] args)
     {
         // 雙擊 .locked 檔案：允許同時存在多個 PasswordPromptWindow（使用者可能想同時解鎖
@@ -134,6 +158,15 @@ public partial class App : Application
             return;
         }
 
+        // 右鍵「上鎖」（見規劃文件第 6 節）：已經設定過共用密碼就走瞬間確認的原生小視窗，
+        // 不開主視窗；還沒設定過就退回開主視窗、導引使用者先完成首次設定。
+        if (args.Length >= 1 && args[0] == FolderGuardLockArgFlag)
+        {
+            var lockPaths = ResolveInitialPaths(args[1..]);
+            HandleFolderGuardLockLaunch(lockPaths);
+            return;
+        }
+
         var initialPaths = args.Length > 0 ? ResolveInitialPaths(args) : new List<string>();
 
         // 加密用的路徑（右鍵選單多選、或其他情境）：如果已經有一個 MainWindow 開著，
@@ -142,14 +175,52 @@ public partial class App : Application
         var existingMainWindow = Windows.OfType<MainWindow>().FirstOrDefault();
         if (existingMainWindow is not null)
         {
-            existingMainWindow.ApplyIncomingPaths(initialPaths);
+            existingMainWindow.ApplyIncomingPaths(initialPaths, "encrypt");
             return;
         }
 
+        OpenMainWindow(initialPaths.Count > 0 ? initialPaths : null, "encrypt");
+    }
+
+    private void HandleFolderGuardLockLaunch(List<string> paths)
+    {
+        if (paths.Count == 0)
+        {
+            return;
+        }
+
+        if (!_folderGuardService!.IsConfigured)
+        {
+            OpenMainWindow(paths, "folderGuardSetup");
+            return;
+        }
+
+        var confirmWindow = new FolderGuardConfirmLockWindow(
+            paths, _folderGuardService, _settings!.Theme,
+            openEncryptTab: encryptPaths =>
+            {
+                var existingMainWindow = Windows.OfType<MainWindow>().FirstOrDefault();
+                if (existingMainWindow is not null)
+                {
+                    existingMainWindow.ApplyIncomingPaths(encryptPaths.ToList(), "encrypt");
+                }
+                else
+                {
+                    OpenMainWindow(encryptPaths.ToList(), "encrypt");
+                }
+            });
+        confirmWindow.Closed += (_, _) => ShutdownIfNoWindowsRemain();
+        confirmWindow.Show();
+    }
+
+    /// <summary>HandleLaunchArgs 裡兩個「需要開一個全新 MainWindow」的分支共用：一般加密路徑、
+    /// 跟資料夾防護首次設定導引都走這裡，只差 initialAction 要帶什麼值。</summary>
+    private void OpenMainWindow(List<string>? initialPaths, string? initialAction)
+    {
         var mainWindow = new MainWindow(
             _vaultManager!, _historyLogger!, _lockService!, _settingsManager!, _settings!, _appDataDir!,
-            _vaultIndexCache!, _vaultChangeWatcher!,
-            initialPaths.Count > 0 ? initialPaths : null);
+            _vaultIndexCache!, _vaultChangeWatcher!, _folderGuardService!,
+            initialPaths, initialAction);
         mainWindow.Closed += (_, _) => ShutdownIfNoWindowsRemain();
         MainWindow = mainWindow;
         mainWindow.Show();
