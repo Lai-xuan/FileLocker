@@ -334,6 +334,24 @@ public class FolderGuardService
         return new FolderGuardUnlockResult(true);
     }
 
+    /// <summary>右鍵選單「解鎖」：對右鍵選取的這幾個資料夾解鎖，只驗證一次密碼/Passkey，
+    /// 解鎖後留在清單顯示「已解鎖」（跟分頁清單頁的個別/全部解鎖行為一致）。</summary>
+    public async Task<FolderGuardUnlockResult> UnlockFoldersAsync(IReadOnlyList<string> paths, string? password, IntPtr ownerWindowHandle)
+    {
+        var verify = await VerifyCredentialAsync(password, ownerWindowHandle);
+        if (!verify.Success)
+        {
+            return verify;
+        }
+
+        foreach (var path in paths)
+        {
+            await UnlockFolderCoreAsync(path, keepInListAsUnlocked: true);
+        }
+
+        return new FolderGuardUnlockResult(true);
+    }
+
     /// <summary>加密流程撞到巢狀防護資料夾、使用者確認解鎖後呼叫：解鎖但不留清單記錄
     /// （規劃文件第 7.2、9 節：臨時彈窗解鎖不留痕跡）。這些資料夾接下來會被加密流程整個消耗掉
     /// （原始資料夾會被刪除），不留記錄也避免之後 ListWithSelfHeal 還要多做一輪自我修復。</summary>

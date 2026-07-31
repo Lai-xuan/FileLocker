@@ -1,4 +1,5 @@
 using System.IO;
+using System.Security.Cryptography;
 using Microsoft.Win32;
 
 namespace FileLocker.App;
@@ -44,7 +45,10 @@ internal static class ShellExtensionRegistrar
             return false;
         }
 
+        // 只比對路徑不夠——DLL 有可能原地被重新編譯覆蓋（路徑沒變、內容變了），這種情況也要
+        // 判定成「需要重新註冊」，才能正確觸發呼叫端「請重啟 Explorer」的提示（見 App.xaml.cs）。
         var alreadyRegistered = string.Equals(ReadRegisteredDllPath(), dllPath, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(ReadRegisteredDllHash(), ComputeFileHash(dllPath), StringComparison.OrdinalIgnoreCase)
             && IsContextMenuHandlerFullyRegistered();
 
         if (alreadyRegistered)
@@ -63,11 +67,28 @@ internal static class ShellExtensionRegistrar
         return key?.GetValue(null) as string;
     }
 
+    private static string? ReadRegisteredDllHash()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey($@"Software\Classes\CLSID\{ClsidString}\InprocServer32");
+        return key?.GetValue("FileHash") as string;
+    }
+
     private static void RegisterClsid(string dllPath)
     {
         using var key = Registry.CurrentUser.CreateSubKey($@"Software\Classes\CLSID\{ClsidString}\InprocServer32");
         key.SetValue(null, dllPath);
         key.SetValue("ThreadingModel", "Apartment");
+        key.SetValue("FileHash", ComputeFileHash(dllPath));
+    }
+
+    /// <summary>
+    /// 用檔案內容雜湊而不是修改時間／檔案大小來判斷「DLL 換了沒」——原地重新編譯覆蓋同一個
+    /// 檔名時，這是唯一能可靠偵測到內容真的不同的方式。
+    /// </summary>
+    private static string ComputeFileHash(string dllPath)
+    {
+        var bytes = File.ReadAllBytes(dllPath);
+        return Convert.ToHexString(SHA256.HashData(bytes));
     }
 
     /// <summary>

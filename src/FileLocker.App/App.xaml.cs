@@ -145,6 +145,7 @@ public partial class App : Application
     // ＝加密」預設行為區隔開——資料夾防護是完全不同的操作，不能讓 Shell Extension 傳來的路徑
     // 預設被當成要加密的東西。
     private const string FolderGuardLockArgFlag = "--folder-guard-lock";
+    private const string FolderGuardUnlockArgFlag = "--folder-guard-unlock";
 
     private void HandleLaunchArgs(string[] args)
     {
@@ -164,6 +165,15 @@ public partial class App : Application
         {
             var lockPaths = ResolveInitialPaths(args[1..]);
             HandleFolderGuardLockLaunch(lockPaths);
+            return;
+        }
+
+        // 右鍵「解鎖」：解鎖一定要驗證身份，不會有「還沒設定過」要導去首次設定的分支——
+        // 右鍵會顯示「解鎖」代表這些資料夾已經是鎖定狀態，資料夾防護一定已經設定過。
+        if (args.Length >= 1 && args[0] == FolderGuardUnlockArgFlag)
+        {
+            var unlockPaths = ResolveInitialPaths(args[1..]);
+            HandleFolderGuardUnlockLaunch(unlockPaths);
             return;
         }
 
@@ -211,6 +221,18 @@ public partial class App : Application
             });
         confirmWindow.Closed += (_, _) => ShutdownIfNoWindowsRemain();
         confirmWindow.Show();
+    }
+
+    private void HandleFolderGuardUnlockLaunch(List<string> paths)
+    {
+        if (paths.Count == 0)
+        {
+            return;
+        }
+
+        var unlockWindow = new FolderGuardUnlockPromptWindow(paths, _folderGuardService!, _settings!.Theme);
+        unlockWindow.Closed += (_, _) => ShutdownIfNoWindowsRemain();
+        unlockWindow.Show();
     }
 
     /// <summary>HandleLaunchArgs 裡兩個「需要開一個全新 MainWindow」的分支共用：一般加密路徑、

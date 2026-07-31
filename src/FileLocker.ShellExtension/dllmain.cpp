@@ -3,6 +3,7 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #include <strsafe.h>
+#include <aclapi.h>
 #include <new>
 #include <vector>
 #include <string>
@@ -113,6 +114,93 @@ static const wchar_t* GetLockFolderMenuLabel()
     return IsSystemUiChinese() ? L"將所選資料夾上鎖" : L"Lock Selected Folders";
 }
 
+static const wchar_t* GetUnlockFolderMenuLabel()
+{
+    return IsSystemUiChinese() ? L"將所選資料夾解鎖" : L"Unlock Selected Folders";
+}
+
+// 跟 FolderGuardAcl.cs 的 DeniedRights（FileSystemRights.ReadAndExecute | Write | Delete）保持一致——
+// 兩邊各自獨立判斷「這個資料夾是不是被資料夾防護鎖定」，用同一組位元遮罩才不會誤判。
+// ReadAndExecute(0x200A9) | Write(0x116) | Delete(0x10000) = 0x210BF。
+static const DWORD kFolderGuardDeniedRights = 0x000210BFUL;
+
+/// <summary>
+/// 查目前使用者的 SID 在這個資料夾上是不是有一條符合的 Deny ACE，邏輯對應
+/// FolderGuardAcl.cs 的 IsDenyRuleActive——用來決定右鍵選單第二項要顯示「上鎖」還是「解鎖」。
+/// 任何 API 失敗都當作「沒有鎖定」，跟 C# 那邊 catch 起來回傳 false 的保守做法一致：
+/// 選單顯示錯了頂多是使用者點了發現不對，不影響資料正確性（真正的解鎖動作還是會重新驗證身份）。
+/// </summary>
+static bool IsFolderGuardLocked(const std::wstring& path)
+{
+    HANDLE hToken = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
+    {
+        return false;
+    }
+
+    DWORD tokenUserSize = 0;
+    GetTokenInformation(hToken, TokenUser, nullptr, 0, &tokenUserSize);
+    std::vector<BYTE> tokenUserBuffer(tokenUserSize);
+    bool gotTokenUser = tokenUserSize > 0
+        && GetTokenInformation(hToken, TokenUser, tokenUserBuffer.data(), tokenUserSize, &tokenUserSize);
+    CloseHandle(hToken);
+
+    if (!gotTokenUser)
+    {
+        return false;
+    }
+
+    PSID currentUserSid = reinterpret_cast<TOKEN_USER*>(tokenUserBuffer.data())->User.Sid;
+
+    PACL pDacl = nullptr;
+    PSECURITY_DESCRIPTOR pSecurityDescriptor = nullptr;
+    DWORD result = GetNamedSecurityInfoW(
+        path.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+        nullptr, nullptr, &pDacl, nullptr, &pSecurityDescriptor);
+
+    if (result != ERROR_SUCCESS || pDacl == nullptr)
+    {
+        if (pSecurityDescriptor != nullptr)
+        {
+            LocalFree(pSecurityDescriptor);
+        }
+        return false;
+    }
+
+    bool isLocked = false;
+    for (WORD i = 0; i < pDacl->AceCount; i++)
+    {
+        LPVOID pAce = nullptr;
+        if (!GetAce(pDacl, i, &pAce))
+        {
+            continue;
+        }
+
+        auto* pHeader = static_cast<ACE_HEADER*>(pAce);
+        if (pHeader->AceType != ACCESS_DENIED_ACE_TYPE)
+        {
+            continue;
+        }
+
+        auto* pDeniedAce = static_cast<ACCESS_DENIED_ACE*>(pAce);
+        PSID aceSid = reinterpret_cast<PSID>(&pDeniedAce->SidStart);
+
+        if (EqualSid(aceSid, currentUserSid) && (pDeniedAce->Mask & kFolderGuardDeniedRights) == kFolderGuardDeniedRights)
+        {
+            isLocked = true;
+            break;
+        }
+    }
+
+    LocalFree(pSecurityDescriptor);
+    return isLocked;
+}
+
+// 選取範圍相對於資料夾防護目前鎖定狀態的三種結果：全部都是資料夾但沒鎖的顯示「上鎖」、
+// 全部都是資料夾且都鎖的顯示「解鎖」，混合鎖定狀態（或選到檔案）兩個都不顯示——避免使用者
+// 搞不清楚這次點下去是要鎖還是解鎖。用一個 enum 存，比兩個獨立布林旗標更不會互相矛盾。
+enum class FolderGuardSelectionState { NotApplicable, AllLocked, AllUnlocked, Mixed };
+
 // ---- 這一版加上 IShellExtInit（接收使用者選了哪些檔案）跟 IContextMenu（顯示選單、處理點擊）----
 class FileLockerShellExtClass : public IShellExtInit, public IContextMenu
 {
@@ -205,6 +293,38 @@ public:
             }
         }
 
+        // 全部都是資料夾時才需要查鎖定狀態——查 ACL 有實際磁碟 I/O 成本，選到檔案時完全不需要。
+        m_folderGuardState = FolderGuardSelectionState::NotApplicable;
+        if (m_allSelectedAreFolders)
+        {
+            bool anyLocked = false;
+            bool anyUnlocked = false;
+            for (const auto& path : m_selectedFiles)
+            {
+                if (IsFolderGuardLocked(path))
+                {
+                    anyLocked = true;
+                }
+                else
+                {
+                    anyUnlocked = true;
+                }
+            }
+
+            if (anyLocked && anyUnlocked)
+            {
+                m_folderGuardState = FolderGuardSelectionState::Mixed;
+            }
+            else if (anyLocked)
+            {
+                m_folderGuardState = FolderGuardSelectionState::AllLocked;
+            }
+            else
+            {
+                m_folderGuardState = FolderGuardSelectionState::AllUnlocked;
+            }
+        }
+
         return S_OK;
     }
 
@@ -219,11 +339,17 @@ public:
         InsertMenuW(hMenu, indexMenu, MF_BYPOSITION | MF_STRING, idCmdFirst + 0, GetContextMenuLabel());
 
         UINT commandCount = 1;
-        if (m_allSelectedAreFolders)
+        if (m_folderGuardState == FolderGuardSelectionState::AllLocked)
+        {
+            InsertMenuW(hMenu, indexMenu + 1, MF_BYPOSITION | MF_STRING, idCmdFirst + 1, GetUnlockFolderMenuLabel());
+            commandCount = 2;
+        }
+        else if (m_folderGuardState == FolderGuardSelectionState::AllUnlocked)
         {
             InsertMenuW(hMenu, indexMenu + 1, MF_BYPOSITION | MF_STRING, idCmdFirst + 1, GetLockFolderMenuLabel());
             commandCount = 2;
         }
+        // Mixed（有些鎖有些沒鎖）：兩個都不顯示，只留「加密」，避免使用者搞不清楚這次點下去的動作。
 
         // 回傳值代表我們加了幾個命令 id，Explorer 靠這個數字知道下一個外掛可以從哪個 id 開始用。
         return MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_NULL, commandCount);
@@ -237,14 +363,22 @@ public:
             return E_INVALIDARG;
         }
 
-        // command 0 = 加密（既有行為，不帶任何旗標）；command 1 = 資料夾防護上鎖，帶
-        // --folder-guard-lock 旗標讓 App 端（App.xaml.cs HandleLaunchArgs）分辨這次啟動要做什麼。
+        // command 0 = 加密（既有行為，不帶任何旗標）；command 1 = 資料夾防護上鎖或解鎖，帶
+        // --folder-guard-lock／--folder-guard-unlock 旗標讓 App 端（App.xaml.cs HandleLaunchArgs）
+        // 分辨這次啟動要做什麼——命令 id 1 實際代表哪個動作，看 QueryContextMenu 當時算出的
+        // m_folderGuardState，這是同一個 COM 物件實例、同一次選單顯示週期，狀態不會變動。
         UINT commandId = LOWORD(pici->lpVerb);
         if (commandId > 1)
         {
             return E_INVALIDARG;
         }
-        const wchar_t* extraArgPrefix = (commandId == 1) ? L" --folder-guard-lock" : L"";
+        const wchar_t* extraArgPrefix = L"";
+        if (commandId == 1)
+        {
+            extraArgPrefix = (m_folderGuardState == FolderGuardSelectionState::AllLocked)
+                ? L" --folder-guard-unlock"
+                : L" --folder-guard-lock";
+        }
 
         if (m_selectedFiles.empty())
         {
@@ -328,7 +462,13 @@ public:
         if (uFlags == GCS_HELPTEXTW)
         {
             const wchar_t* helpText;
-            if (idCmd == 1)
+            if (idCmd == 1 && m_folderGuardState == FolderGuardSelectionState::AllLocked)
+            {
+                helpText = IsSystemUiChinese()
+                    ? L"解除此資料夾的存取限制"
+                    : L"Remove the access restriction on this folder";
+            }
+            else if (idCmd == 1)
             {
                 helpText = IsSystemUiChinese()
                     ? L"限制存取此資料夾，不加密內容"
@@ -351,6 +491,7 @@ private:
     long m_cRef;
     std::vector<std::wstring> m_selectedFiles;
     bool m_allSelectedAreFolders = false;
+    FolderGuardSelectionState m_folderGuardState = FolderGuardSelectionState::NotApplicable;
 };
 
 // ---- Class Factory：COM 標準機制，負責「生出」上面那個類別的實體 ----

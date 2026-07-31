@@ -57,4 +57,19 @@
     <Copy SourceFiles="@(ShellExtensionDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="'@(ShellExtensionDll)' != ''" />
   </Target>
 
+  <!--
+    dotnet publish 產生 publish/ 資料夾用的是自己一套「要發佈哪些檔案」的清單機制（ComputeFilesToPublish），
+    不會自動把 CopyShellExtensionDll 在 Build 階段丟進 $(OutDir) 的檔案一起帶過去——這裡用 MSBuild
+    標準做法（BeforeTargets="ComputeFilesToPublish" 塞 ResolvedFileToPublish 項目）讓它也進到
+    publish 輸出，不然照安裝程式打包 publish 資料夾的話，Shell Extension DLL 會整個漏掉。
+  -->
+  <Target Name="AddShellExtensionDllToPublishOutput" BeforeTargets="ComputeFilesToPublish" Condition="Exists('..\FileLocker.ShellExtension\FileLockerShellExtension.dll')">
+    <ItemGroup>
+      <ResolvedFileToPublish Include="..\FileLocker.ShellExtension\FileLockerShellExtension.dll">
+        <RelativePath>FileLockerShellExtension.dll</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+
 </Project>
