@@ -89,4 +89,36 @@
     </ItemGroup>
   </Target>
 
+  <!--
+    CLI（FileLocker.Cli）跟 GUI 是各自獨立的建置產物，之前完全沒有被納入安裝內容，見規格文件
+    第 21 節。這裡比照上面 webapp/ 的三段式做法：Build 階段先另外 dotnet build 出 CLI，複製到
+    輸出目錄下的 cli/ 子資料夾，再讓 dotnet publish 也把這個子資料夾一起帶走。
+
+    放獨立子資料夾、不是跟 GUI 混在同一層：CLI 自己有一份完整的相依 DLL（FileLocker.Core.dll
+    等），跟 GUI 那份是分開建置出來的兩份拷貝，混在同一個資料夾容易撞名或載到錯的版本
+    （.NET framework-dependent 部署靠同資料夾內的 DLL 探測）。獨立子資料夾也剛好搭配安裝程式
+    新加的 path_target_exe 欄位——加入系統 PATH 的只有 cli/ 這一層，不會把 GUI 那堆 DLL
+    所在的安裝根目錄整個暴露進使用者的 PATH。
+  -->
+  <Target Name="BuildCli" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <Exec Command="dotnet build ..\FileLocker.Cli\FileLocker.Cli.csproj -c Release" />
+  </Target>
+
+  <Target Name="CopyCliForRelease" AfterTargets="BuildCli" Condition="'$(Configuration)' == 'Release'">
+    <ItemGroup>
+      <CliFiles Include="..\FileLocker.Cli\bin\Release\net10.0-windows10.0.19041.0\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(CliFiles)" DestinationFolder="$(OutDir)cli\%(RecursiveDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="AddCliToPublishOutput" BeforeTargets="ComputeFilesToPublish" Condition="'$(Configuration)' == 'Release' AND Exists('..\FileLocker.Cli\bin\Release\net10.0-windows10.0.19041.0')">
+    <ItemGroup>
+      <CliFilesForPublish Include="..\FileLocker.Cli\bin\Release\net10.0-windows10.0.19041.0\**\*.*" />
+      <ResolvedFileToPublish Include="@(CliFilesForPublish)">
+        <RelativePath>cli\%(RecursiveDir)%(Filename)%(Extension)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+
 </Project>

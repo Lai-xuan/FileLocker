@@ -551,6 +551,8 @@ App 圖示（工作列/Alt+Tab）：純平面白色鑰匙孔圖形 + 黃銅色�
 
 ## 15. CLI 介面（`FileLocker.Cli`）
 
+已隨安裝程式一起發布並加入系統 PATH，見第 19 節。
+
 ```
 FileLocker.Cli --encrypt <路徑1> [路徑2 ...]
 FileLocker.Cli --unlock <.locked 路徑1> [路徑2 ...]
@@ -643,7 +645,12 @@ C++（`dllmain.cpp`），CLSID `{A1B2C3D4-E5F6-4789-9ABC-DEF012345678}`。實作
 
 安裝流程已對接的項目：主程式與 Shell Extension DLL（放同一資料夾，見第 16.3 節，安裝程式不需要處理任何 COM 登錄邏輯，App 啟動時自我註冊）、`.locked` 副檔名關聯與圖示（見第 16.4 節，`installer_config.json` 的 `file_associations`／`doc_icon`）、`.NET Desktop Runtime` 相依套件偵測安裝（`dependencies: ["dotnet_desktop"]`）、解除安裝程式（`uninstall.exe`）、安裝清單（`install_manifest.json`，供解除安裝時精確比對要移除哪些檔案）。安裝完成後的資料夾內容即為第 23 節「軟體更新檢查」下載回來的更新包會覆蓋的同一份結構。
 
-**還沒做的**：CLI（`FileLocker.Cli`）目前不包含在安裝內容裡，見第 21 節。
+**CLI 打包**：`FileLocker.App.csproj` 新增三個 Release-only MSBuild Target（`BuildCli`／`CopyCliForRelease`／`AddCliToPublishOutput`，比照 §16 前端 `webapp/` 那組模式），把 `FileLocker.Cli` 另外建置後複製進輸出目錄下的獨立 `cli/` 子資料夾，`dotnet build` 跟 `dotnet publish` 兩種輸出都涵蓋到。放獨立子資料夾（不跟 GUI 混在同一層）是因為 CLI 有自己一份完整的相依 DLL，且搭配安裝程式新增的 `path_target_exe` 欄位——`installer_config.json` 另外加上：
+```json
+"add_to_path": true,
+"path_target_exe": "cli\\FileLocker.Cli.exe"
+```
+只把 `cli/` 這一層加進系統 PATH，不會把 GUI 那堆 DLL 所在的安裝根目錄整個暴露進使用者的 PATH。
 
 **沒有數位簽章**：使用者第一次執行安裝檔，Windows SmartScreen 大機率會跳警告，要解決需要另外採購程式碼簽署憑證，這不是安裝程式工具本身能解決的事。這也代表目前完全沒有偵測執行檔本身是否被竄改的機制——數位簽章除了消除 SmartScreen 警告，更重要的作用是讓 Windows 能自動驗證執行檔完整性，這是業界標準做法，但需要外部採購憑證的商業流程。「程式自己在啟動時檢查自身雜湊值」這種做法評估後不採用：攻擊者只要能竄改執行檔內容，同樣能連檢查邏輯本身一起改掉，只能擋住意外損毀、擋不住真正有心的竄改，容易給人錯誤的安全感。
 
@@ -671,6 +678,7 @@ C++（`dllmain.cpp`），CLSID `{A1B2C3D4-E5F6-4789-9ABC-DEF012345678}`。實作
 | 資料夾防護：雙擊已上鎖資料夾直接解鎖 | Shell Namespace Extension（`CLSID2`／`desktop.ini`）技術路線 | 實驗性功能，程式碼保留但預設關閉，見第 22.6 節 |
 | 軟體更新檢查 | 設定頁一鍵檢查 GitHub Release、下載安裝檔並啟動，見第 23 節 | 完成 |
 | 打包安裝程式 | 對接 mac-style-windows-installer，含 `.locked` 檔案關聯、圖示接入 | 完成，見第 19 節 |
+| CLI 隨裝發布 | `FileLocker.Cli` 打包進 `cli/` 子資料夾，安裝程式透過 `path_target_exe` 加入系統 PATH | 完成，見第 19 節 |
 
 ---
 
@@ -679,7 +687,6 @@ C++（`dllmain.cpp`），CLSID `{A1B2C3D4-E5F6-4789-9ABC-DEF012345678}`。實作
 - CLI 不涵蓋 Passkey（設計決定，見第 15 節），未來若要支援應為獨立指令。
 - 沒有數位簽章，也沒有執行檔完整性驗證機制（詳見第 19 節的評估與取捨）；安裝檔與更新下載回來的安裝檔執行時，Windows SmartScreen 可能會跳出警告。
 - 雲端同步情境僅完成自動化測試，跨裝置的完整人工實測待使用者自行進行。
-- 安裝包目前只打算納入 GUI（`FileLocker.App`），CLI（`FileLocker.Cli`）尚未一起發布：兩者是獨立的建置產物，`FileLocker.App.csproj` 沒有引用 CLI 專案，Release 輸出資料夾裡不會自動有 `FileLocker.Cli.exe`。之後如果要一併發布，需要另外 `dotnet build src/FileLocker.Cli -c Release`，把輸出複製進安裝內容資料夾，並在安裝程式裡把該路徑加入系統 PATH（CLI 是設計給終端機/腳本用的，不加 PATH 使用上很不方便；GUI 本身不需要加 PATH）。
 - 軟體更新檢查僅支援透過正式安裝版（含 `installer_config.json`）比對版本，需要能連上 `api.github.com`；直接以原始碼執行的開發版不會顯示版本資訊（見第 23 節）。
 - 資料夾防護的「雙擊已上鎖資料夾直接解鎖」是實驗性功能，預設關閉、程式碼保留但不再繼續開發測試——實測曾經在特定情境下造成 `explorer.exe` 整個行程死結（需要重開機才能解除），詳見第 22.6 節，這是刻意暫緩、不是遺漏。
 
