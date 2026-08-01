@@ -105,15 +105,23 @@
   </Target>
 
   <Target Name="CopyCliForRelease" AfterTargets="BuildCli" Condition="'$(Configuration)' == 'Release'">
+    <!--
+      Exclude 排掉 Cli 自己輸出目錄裡可能存在的 publish\ 子資料夾——如果有人對 FileLocker.Cli
+      單獨跑過 dotnet publish，它自己的 bin\Release\...\ 底下就會多一份 publish\ 子資料夾，
+      這裡的 **\*.* 萬用字元不排除的話會把那份也一起遞迴掃進來，複製出巢狀重複的內容
+      （cli\publish\... 裡面又是一份完整拷貝）。
+    -->
     <ItemGroup>
-      <CliFiles Include="..\FileLocker.Cli\bin\Release\net10.0-windows10.0.19041.0\**\*.*" />
+      <CliFiles Include="..\FileLocker.Cli\bin\Release\net10.0-windows10.0.19041.0\**\*.*"
+                Exclude="..\FileLocker.Cli\bin\Release\net10.0-windows10.0.19041.0\publish\**\*.*" />
     </ItemGroup>
     <Copy SourceFiles="@(CliFiles)" DestinationFolder="$(OutDir)cli\%(RecursiveDir)" SkipUnchangedFiles="true" />
   </Target>
 
   <Target Name="AddCliToPublishOutput" BeforeTargets="ComputeFilesToPublish" Condition="'$(Configuration)' == 'Release' AND Exists('..\FileLocker.Cli\bin\Release\net10.0-windows10.0.19041.0')">
     <ItemGroup>
-      <CliFilesForPublish Include="..\FileLocker.Cli\bin\Release\net10.0-windows10.0.19041.0\**\*.*" />
+      <CliFilesForPublish Include="..\FileLocker.Cli\bin\Release\net10.0-windows10.0.19041.0\**\*.*"
+                           Exclude="..\FileLocker.Cli\bin\Release\net10.0-windows10.0.19041.0\publish\**\*.*" />
       <ResolvedFileToPublish Include="@(CliFilesForPublish)">
         <RelativePath>cli\%(RecursiveDir)%(Filename)%(Extension)</RelativePath>
         <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
