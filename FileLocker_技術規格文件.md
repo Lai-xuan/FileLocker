@@ -1,6 +1,6 @@
 # FileLocker 技術規格文件
 
-版本：v3.1（併入資料夾防護 Folder Guard、軟體更新檢查兩項全新功能，安裝程式打包已完成可用，`.locked` 副檔名關聯與圖示改由安裝程式設定檔處理，見第 19、22、23 節）| 最後更新：2026-08-01
+版本：v3.2（第 21～24 節重新整理：資料夾防護、軟體更新檢查依序調整為第 21、22 節，已知限制與待辦事項拆成兩個獨立項目並移至文件最末尾，符合 CLAUDE.md 撰寫規範）| 最後更新：2026-08-02
 
 ---
 
@@ -9,7 +9,7 @@
 **目標**：Windows 檔案／資料夾保護工具，提供兩種互相獨立、安全等級不同的保護機制（見 [`CONTEXT.md`](CONTEXT.md) 完整術語表）：
 
 - **加密**：使用者在檔案總管選取檔案或資料夾，右鍵加密，加密後內容集中存放在管理區（Vault），原位置留下一個 `.locked` 指標檔。雙擊指標檔或在 App 裡操作，輸入密碼（或用 Passkey、恢復金鑰）即可還原到原位置或指定位置。這是系統既有、最強的保護等級。
-- **資料夾防護（Folder Guard）**：純粹透過 Windows ACL 拒絕目前帳號的存取權來限制資料夾，不加密內容、資料夾原地保留不搬動。刻意接受的較弱保護等級，防的是「隨手瀏覽」，不是「蓄意繞過權限」——見第 22 節。
+- **資料夾防護（Folder Guard）**：純粹透過 Windows ACL 拒絕目前帳號的存取權來限制資料夾，不加密內容、資料夾原地保留不搬動。接受較弱保護等級的取捨，因為防的是「隨手瀏覽」，不是「蓄意繞過權限」——見第 21 節。
 
 **技術選型**：C#/.NET 10 後端 + WebView2（Vue 3 + Vite）前端 + C++ Shell Extension。理由：Registry/COM 這塊逃不掉底層要碰 Windows API，把它壓縮成一個獨立、輕量的 Shell Extension 元件；其餘商業邏輯、資料庫存取、加密全部用 C#（生態成熟、除錯工具好），不需要在多種語言之間切換心智負擔；前端用 HTML/CSS/JS 可以最大化調整空間，樣式想改就改 CSS，不受 XAML 的樣板限制。
 
@@ -25,8 +25,8 @@
 9. 「關鍵操作驗證」機制：清除使用紀錄等破壞性操作可設定 Windows Hello 驗證門檻
 10. 介面設計參考 Apple HIG 與 emilkowalski/skills 的動效細節做法
 11. 支援繁體中文／英文雙語，前端文案與後端常見錯誤情境皆有對應翻譯
-12. 資料夾防護（Folder Guard）：獨立分頁，右鍵直接上鎖/解鎖資料夾，共用密碼＋選配 Passkey，純 ACL 限制不加密內容（見第 22 節）
-13. 設定頁可一鍵檢查軟體更新，直接下載並啟動安裝程式（見第 23 節）
+12. 資料夾防護（Folder Guard）：獨立分頁，右鍵直接上鎖/解鎖資料夾，共用密碼＋選配 Passkey，純 ACL 限制不加密內容（見第 21 節）
+13. 設定頁可一鍵檢查軟體更新，直接下載並啟動安裝程式（見第 22 節）
 
 ---
 
@@ -643,7 +643,7 @@ C++（`dllmain.cpp`），CLSID `{A1B2C3D4-E5F6-4789-9ABC-DEF012345678}`。實作
 
 **已完成並可用**。最終編譯完成的 `FileLocker.App.exe`（含 C# 主程式 + Shell Extension DLL）打包成安裝檔，沿用既有的 **[mac-style-windows-installer](https://github.com/Lai-xuan/mac-style-windows-installer)** 專案，透過 `installer_config.json` 宣告安裝內容（`app_name`／`main_exe`／`file_associations`／`doc_icon`／`dependencies`／EULA 文字等，見第 16.4 節），不需要另外寫安裝腳本邏輯。
 
-安裝流程已對接的項目：主程式與 Shell Extension DLL（放同一資料夾，見第 16.3 節，安裝程式不需要處理任何 COM 登錄邏輯，App 啟動時自我註冊）、`.locked` 副檔名關聯與圖示（見第 16.4 節，`installer_config.json` 的 `file_associations`／`doc_icon`）、`.NET Desktop Runtime` 相依套件偵測安裝（`dependencies: ["dotnet_desktop"]`）、解除安裝程式（`uninstall.exe`）、安裝清單（`install_manifest.json`，供解除安裝時精確比對要移除哪些檔案）。安裝完成後的資料夾內容即為第 23 節「軟體更新檢查」下載回來的更新包會覆蓋的同一份結構。
+安裝流程已對接的項目：主程式與 Shell Extension DLL（放同一資料夾，見第 16.3 節，安裝程式不需要處理任何 COM 登錄邏輯，App 啟動時自我註冊）、`.locked` 副檔名關聯與圖示（見第 16.4 節，`installer_config.json` 的 `file_associations`／`doc_icon`）、`.NET Desktop Runtime` 相依套件偵測安裝（`dependencies: ["dotnet_desktop"]`）、解除安裝程式（`uninstall.exe`）、安裝清單（`install_manifest.json`，供解除安裝時精確比對要移除哪些檔案）。安裝完成後的資料夾內容即為第 22 節「軟體更新檢查」下載回來的更新包會覆蓋的同一份結構。
 
 **CLI 打包**：`FileLocker.App.csproj` 新增三個 Release-only MSBuild Target（`BuildCli`／`CopyCliForRelease`／`AddCliToPublishOutput`，比照 §16 前端 `webapp/` 那組模式），把 `FileLocker.Cli` 另外建置後複製進輸出目錄下的獨立 `cli/` 子資料夾，`dotnet build` 跟 `dotnet publish` 兩種輸出都涵蓋到。放獨立子資料夾（不跟 GUI 混在同一層）是因為 CLI 有自己一份完整的相依 DLL，且搭配安裝程式新增的 `path_target_exe` 欄位——`installer_config.json` 另外加上：
 ```json
@@ -674,46 +674,36 @@ C++（`dllmain.cpp`），CLSID `{A1B2C3D4-E5F6-4789-9ABC-DEF012345678}`。實作
 | 密碼小視窗字型 | 內嵌 IBM Plex Sans TC，跟網頁端字型家族一致 | 完成 |
 | 多語言 | 前端靜態文字、後端錯誤代碼（含搬移 Vault／存恢復金鑰失敗訊息） | 完成 |
 | 雲端同步情境測試 | 模擬多裝置同步、衝突情境 | 自動化測試完成；跨裝置人工實測待使用者自行進行 |
-| 資料夾防護（Folder Guard） | 純 ACL 資料夾存取限制（不加密）、共用密碼＋選配 Passkey、右鍵上鎖/解鎖、清單頁管理，見第 22 節 | 完成 |
-| 資料夾防護：雙擊已上鎖資料夾直接解鎖 | Shell Namespace Extension（`CLSID2`／`desktop.ini`）技術路線 | 實驗性功能，程式碼保留但預設關閉，見第 22.6 節 |
-| 軟體更新檢查 | 設定頁一鍵檢查 GitHub Release、下載安裝檔並啟動，見第 23 節 | 完成 |
+| 資料夾防護（Folder Guard） | 純 ACL 資料夾存取限制（不加密）、共用密碼＋選配 Passkey、右鍵上鎖/解鎖、清單頁管理，見第 21 節 | 完成 |
+| 資料夾防護：雙擊已上鎖資料夾直接解鎖 | Shell Namespace Extension（`CLSID2`／`desktop.ini`）技術路線 | 實驗性功能，程式碼保留但預設關閉，見第 21.6 節 |
+| 軟體更新檢查 | 設定頁一鍵檢查 GitHub Release、下載安裝檔並啟動，見第 22 節 | 完成 |
 | 打包安裝程式 | 對接 mac-style-windows-installer，含 `.locked` 檔案關聯、圖示接入 | 完成，見第 19 節 |
 | CLI 隨裝發布 | `FileLocker.Cli` 打包進 `cli/` 子資料夾，安裝程式透過 `path_target_exe` 加入系統 PATH | 完成，見第 19 節 |
 
 ---
 
-## 21. 已知限制與待辦事項（非缺陷，是刻意取捨或尚未進行的工作）
-
-- CLI 不涵蓋 Passkey（設計決定，見第 15 節），未來若要支援應為獨立指令。
-- 沒有數位簽章，也沒有執行檔完整性驗證機制（詳見第 19 節的評估與取捨）；安裝檔與更新下載回來的安裝檔執行時，Windows SmartScreen 可能會跳出警告。
-- 雲端同步情境僅完成自動化測試，跨裝置的完整人工實測待使用者自行進行。
-- 軟體更新檢查僅支援透過正式安裝版（含 `installer_config.json`）比對版本，需要能連上 `api.github.com`；直接以原始碼執行的開發版不會顯示版本資訊（見第 23 節）。
-- 資料夾防護的「雙擊已上鎖資料夾直接解鎖」是實驗性功能，預設關閉、程式碼保留但不再繼續開發測試——實測曾經在特定情境下造成 `explorer.exe` 整個行程死結（需要重開機才能解除），詳見第 22.6 節，這是刻意暫緩、不是遺漏。
-
----
-
-## 22. 資料夾防護（Folder Guard）
+## 21. 資料夾防護（Folder Guard）
 
 獨立於「加密」之外的第二種保護機制：**不加密內容**，純粹透過 Windows ACL 拒絕目前登入帳號對某資料夾的存取權，資料夾原地保留、不搬動、不需要提權。定位是「防隨手瀏覽」，不是「防蓄意繞過」——完整的威脅模型與機制取捨推理見 [`docs/adr/0001-folder-guard-deny-acl-not-ownership-transfer.md`](docs/adr/0001-folder-guard-deny-acl-not-ownership-transfer.md)；設計訪談的原始逐項紀錄見 [`FileLocker_資料夾防護_功能規劃.md`](FileLocker_資料夾防護_功能規劃.md)（規劃文件，現已實作完成，本節是併入後的目前狀態說明）。
 
 跟「加密」分頁刻意保持語彙區隔：加密用「加密／解密」，資料夾防護用「上鎖／解鎖」，兩邊動詞互不共用，避免使用者混淆兩種保護等級的差異。
 
-### 22.1 憑證模型
+### 21.1 憑證模型
 
 - **整個功能共用一組密碼＋選配 Passkey**（`FolderGuardService`），不是每個資料夾各自一組。第一次上鎖任何資料夾前，強制先完成這組共用憑證的設定。
 - 密碼必填、Passkey 選配，密碼永遠是保底解鎖手段——這個功能沒有像加密那樣的「恢復金鑰」可以兜底，不能讓 Passkey 變成唯一解鎖方式。
 - 密碼錯誤鎖定套用跟加密一樣的機制（`LockoutTracker`，連續錯 5 次、指數退避最長 1 小時），但鍵值是固定代表整個功能的常數鍵，不是逐項目 UUID——鎖定會影響「所有」正在上鎖的資料夾，這是刻意接受的取捨。Passkey 略過鎖定機制，理由同第 6.4 節。
 - 忘記密碼、Passkey 也失效時，仍可透過檔案總管「內容→安全性→進階」拿回資料夾存取權——這不是加密，沒有無法復原的風險，設定頁會主動告知這件事。
 
-### 22.2 ACL 機制
+### 21.2 ACL 機制
 
 `FolderGuardAcl.ApplyDeny`/`RemoveDeny`：對目前登入帳號的 SID 加上（或移除）一條拒絕 `ReadAndExecute | Write | Delete`（`FileSystemRights` 組合值 `0x301BF`，剛好等於 .NET `FileSystemRights.Modify`）、`ContainerInherit | ObjectInherit` 繼承旗標的 ACE。不處理父層列舉權限、不搭配隱藏屬性——資料夾在檔案總管裡看得到，雙擊進去才會被拒絕（Windows 原生「存取被拒」錯誤視窗，不攔截、不替換成自訂畫面）。拒絕 `Delete` 權限連帶擋住重新命名（NTFS 底下重新命名一個物件需要對該物件本身的 `Delete` 權限）。
 
-**明確 ACE 永遠優先於繼承 ACE**：這條規則本身是資料夾上一條「明確」的 Deny，會繼承給資料夾內所有既有與新增的子項目。`FolderGuardNamespaceMarker`（見第 22.6 節）需要讓 `desktop.ini` 在套用 Deny 之後仍然可讀，做法是在套用 Deny **之前**，先於 `desktop.ini` 本身加一條明確的 Allow ACE——之後資料夾的繼承 Deny 傳播到這個既有檔案時，會被這條已存在的明確 Allow 蓋過去（Windows ACL 規則：不論 Allow 或 Deny，明確規則永遠比繼承規則優先）。
+**明確 ACE 永遠優先於繼承 ACE**：這條規則本身是資料夾上一條「明確」的 Deny，會繼承給資料夾內所有既有與新增的子項目。`FolderGuardNamespaceMarker`（見第 21.6 節）需要讓 `desktop.ini` 在套用 Deny 之後仍然可讀，做法是在套用 Deny **之前**，先於 `desktop.ini` 本身加一條明確的 Allow ACE——之後資料夾的繼承 Deny 傳播到這個既有檔案時，會被這條已存在的明確 Allow 蓋過去（Windows ACL 規則：不論 Allow 或 Deny，明確規則永遠比繼承規則優先）。
 
-ACL 拒絕規則掛在目前登入帳號的 SID 上，FileLocker App 自己的行程也是用同一個帳號跑，**加密流程讀取被上鎖的資料夾時一樣會被拒絕存取**，不只是使用者在檔案總管點不進去而已（見第 22.5 節）。
+ACL 拒絕規則掛在目前登入帳號的 SID 上，FileLocker App 自己的行程也是用同一個帳號跑，**加密流程讀取被上鎖的資料夾時一樣會被拒絕存取**，不只是使用者在檔案總管點不進去而已（見第 21.5 節）。
 
-### 22.3 Shell Extension 整合
+### 21.3 Shell Extension 整合
 
 `FileLockerShellExtension.dll`（`dllmain.cpp`）在原本「使用 FileLocker 加密」選單項目之外，多插入第二個命令 id（`idCmdFirst + 1`），依 `IsFolderGuardLocked` 現場查詢的 ACL 狀態決定要顯示「將所選資料夾上鎖」還是「將所選資料夾解鎖」：
 
@@ -722,17 +712,17 @@ ACL 拒絕規則掛在目前登入帳號的 SID 上，FileLocker App 自己的�
 - `InvokeCommand` 依命令 id 組出 `--folder-guard-lock` 或 `--folder-guard-unlock` 命令列旗標啟動 `FileLocker.App.exe`，跟現有「直接傳路徑＝加密」預設行為區隔開（見 `App.xaml.cs` `HandleLaunchArgs`）。
 - 支援多選批次：因為憑證是共用一組，批次上鎖/解鎖不需要處理加密批次的複雜度（第 4.5 節那種「多選時 Passkey 勾選框鎖住」的問題），純粹對每個選取的資料夾各自套用同一組 ACL 規則。
 
-### 22.4 上鎖／解鎖互動
+### 21.4 上鎖／解鎖互動
 
 - **右鍵「上鎖」**：已設定過共用密碼時，直接跳出原生 WPF 小視窗（`FolderGuardConfirmLockWindow`，技術上比照 `PasswordPromptWindow`，不透過 WebView2）確認「你要將『OO』上鎖嗎？」，**上鎖本身不需要輸入密碼**（密碼只用來驗證解鎖身份，不是上鎖的必要條件），確認彈窗本身已足夠防止手滑誤觸。尚未設定過共用密碼則改為開啟主程式、跳到「資料夾防護」分頁引導完成首次設定，設定完成後才真的上鎖這次選取的資料夾。
 - **右鍵「解鎖」**：跳出 `FolderGuardUnlockPromptWindow`，有設定 Passkey 就優先跳 Windows Hello 驗證，使用者把驗證視窗關掉才退回密碼輸入畫面（比照第 14.4 節 `PasswordPromptWindow` 遇到 Passkey 項目時的既有互動模式）。右鍵一定顯示「解鎖」代表已經是鎖定狀態，不會有「還沒設定過」要導去首次設定的分支。
 - **分頁內清單頁操作**：獨立分頁管理所有上鎖中的資料夾，可個別解鎖、一次全部解鎖（`UnlockAllAsync`）；已解鎖項目可「前往資料夾」直接開啟總管，或「再次上鎖」恢復保護。健壯性檢查：清單頁載入時針對索引裡每個路徑即時檢查 ACL 是否真的有對應的拒絕規則，不符合就視為「已不在防護中」，比照 `VaultManager.ScanAll()`「以磁碟實際狀態為準，索引只是加速用途」的既有設計原則。
 
-### 22.5 與加密流程的互動
+### 21.5 與加密流程的互動
 
-`LockService` 建構時透過委派 `getGuardedFolderPaths` 得知目前哪些資料夾正在防護中（見 `App.xaml.cs`），加密流程一開始掃描到選取範圍內含正在上鎖的資料夾，會先跳出彈窗列出被擋的子資料夾清單，要求先解鎖才能繼續（驗證方式同第 22.4 節），不會讓加密流程半途讀取 ACL 拒絕的資料夾而失敗。已解鎖並被加密流程消耗（打包進外層 zip）的資料夾，在資料夾防護索引裡對應的項目也會一併清除。
+`LockService` 建構時透過委派 `getGuardedFolderPaths` 得知目前哪些資料夾正在防護中（見 `App.xaml.cs`），加密流程一開始掃描到選取範圍內含正在上鎖的資料夾，會先跳出彈窗列出被擋的子資料夾清單，要求先解鎖才能繼續（驗證方式同第 21.4 節），不會讓加密流程半途讀取 ACL 拒絕的資料夾而失敗。已解鎖並被加密流程消耗（打包進外層 zip）的資料夾，在資料夾防護索引裡對應的項目也會一併清除。
 
-### 22.6 實驗性功能：雙擊已上鎖資料夾直接解鎖（預設關閉）
+### 21.6 實驗性功能：雙擊已上鎖資料夾直接解鎖（預設關閉）
 
 `AppSettings`／`FolderGuardData` 的 `DoubleClickUnlockEnabled`（預設 `false`）控制的選配功能：雙擊一個已上鎖的資料夾，不看到 Windows 原生「存取被拒」畫面，而是直接跳出解鎖確認彈窗。技術路線是 Windows Shell Namespace Extension：
 
@@ -744,7 +734,7 @@ ACL 拒絕規則掛在目前登入帳號的 SID 上，FileLocker App 自己的�
 
 ---
 
-## 23. 軟體更新檢查
+## 22. 軟體更新檢查
 
 設定頁一鍵檢查是否有新版本（`MainWindow.xaml.cs` 的 `HandleCheckForUpdatesRequestAsync`）：
 
@@ -752,3 +742,29 @@ ACL 拒絕規則掛在目前登入帳號的 SID 上，FileLocker App 自己的�
 - 發現新版本會自動跳出彈窗，內容是 GitHub Release 說明的 Markdown 渲染結果（獨立可捲動框框，避免長篇說明撐爆版面）。
 - 確認更新後直接下載安裝檔並啟動安裝程式；**安裝程式確認成功啟動後才關閉 FileLocker 本體**，避免「先關自己、安裝程式卻沒真的啟動」導致使用者以為在更新、實際上什麼都沒發生，也避免安裝時本體檔案還被鎖住導致覆蓋失敗。
 - 需要能連上 `api.github.com`；沒有網路或請求失敗只當作「這次沒查到更新」，不當成錯誤彈窗打斷使用者。
+
+---
+
+## 23. 已知限制（非缺陷，為取捨或現有技術/流程的限制）
+
+- **CLI 不涵蓋 Passkey**：設計決定，見第 15 節。`KeyCredentialManager` 一定會跳出 Windows Hello 系統 UI，這跟「無 GUI 環境可操作」的 CLI 存在目的直接衝突；未來若要支援，應為獨立指令，不塞進 `--encrypt` 裡。
+- **沒有數位簽章，也沒有執行檔完整性驗證機制**：詳見第 19 節的評估與取捨——需要另外採購程式碼簽署憑證，不是安裝程式工具本身能解決的事；「程式自己在啟動時檢查自身雜湊值」評估後不採用，因為攻擊者能竄改執行檔內容的同時，也能連檢查邏輯本身一起改掉，只能擋住意外損毀、擋不住真正有心的竄改，容易給人錯誤的安全感。安裝檔與更新下載回來的安裝檔執行時，Windows SmartScreen 可能會跳出警告。
+- **軟體更新檢查僅支援透過正式安裝版比對版本**：見第 22 節，需要本機存在 `installer_config.json`（僅由 mac-style-windows-installer 安裝時放入）且能連上 `api.github.com`；直接以原始碼執行的開發版不會顯示版本資訊，這不算錯誤情境。
+- **資料夾防護的「雙擊已上鎖資料夾直接解鎖」維持實驗性、預設關閉**：見第 21.6 節，實測曾經在特定情境下造成 `explorer.exe` 整個行程死結（需要重開機才能解除），是系統層級的穩定性風險，跟「防隨手瀏覽」這個功能定位要求的可靠度不成比例，因此不繼續投入開發測試資源，這是刻意暫緩的決定，不是遺漏。
+
+---
+
+## 24. 待辦事項
+
+### 24.1 進行中
+
+- **雲端同步跨裝置人工實測**：見第 11.2 節，目前僅完成自動化測試（模擬多裝置同步、衝突情境），跨裝置的完整人工實測待使用者自行進行。
+
+### 24.2 已完成之待辦
+
+以下項目過去曾列在待辦／已知限制中，目前已完成，記錄於此保留歷史脈絡：
+
+- **打包安裝程式**：對接 mac-style-windows-installer，含 `.locked` 檔案關聯與圖示接入，見第 19 節。
+- **CLI 隨裝發布**：`FileLocker.Cli` 打包進 `cli/` 子資料夾，安裝程式透過 `path_target_exe` 加入系統 PATH，見第 19 節。
+- **資料夾防護（Folder Guard）功能開發**：純 ACL 資料夾存取限制、共用密碼＋選配 Passkey、右鍵上鎖/解鎖、清單頁管理，見第 21 節。
+- **軟體更新檢查功能開發**：設定頁一鍵檢查 GitHub Release、下載安裝檔並啟動，見第 22 節。

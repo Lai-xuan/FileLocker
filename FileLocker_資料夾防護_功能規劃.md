@@ -1,6 +1,6 @@
 # FileLocker「資料夾防護」功能規劃
 
-**狀態：已完成實作，併入 `FileLocker_技術規格文件.md` 第 22 節**（本文件保留作為原始設計訪談紀錄，記錄當初定案理由；目前實際行為與狀態以技術規格文件第 22 節為準，兩者有出入時以技術規格文件為準）
+**狀態：已完成實作，併入 `FileLocker_技術規格文件.md` 第 21 節**（本文件保留作為原始設計訪談紀錄，記錄當初定案理由；目前實際行為與狀態以技術規格文件第 21 節為準，兩者有出入時以技術規格文件為準）
 
 配套文件：[`CONTEXT.md`](CONTEXT.md)（術語）、[`docs/adr/0001-folder-guard-deny-acl-not-ownership-transfer.md`](docs/adr/0001-folder-guard-deny-acl-not-ownership-transfer.md)（機制與威脅模型的取捨紀錄）
 
