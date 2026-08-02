@@ -97,7 +97,7 @@ FileLocker/
 
 - 安裝程式尚無數位簽章，執行時可能觸發 Windows SmartScreen 警告（見上方「下載與安裝」與規格文件第 19 節）。
 - 雲端同步情境的跨裝置人工實測尚待進行。
-- 資料夾防護的「雙擊已上鎖資料夾直接解鎖」是實驗性功能，預設關閉（規格文件第 22.6 節）。
+- 資料夾防護的進階選配「使用 .lockfolder 開啟上鎖資料夾」預設關閉，開啟後 `.lockfolder` 標記檔會讓資料夾在「依檔案類型分組」檢視下跟真正的資料夾分開排列（規格文件第 21.6 節）。
 - 密碼遺失無法復原，沒有任何後門機制。
 
 ### 授權
@@ -187,7 +187,7 @@ FileLocker/
 
 - The installer isn't code-signed yet, which may trigger a Windows SmartScreen warning (see "Download & install" above and spec §19).
 - Manual cross-device testing of cloud-sync scenarios is still pending.
-- Folder Guard's "double-click a locked folder to unlock directly" is an experimental feature, disabled by default (spec §22.6).
+- Folder Guard's advanced "Open locked folders with a .lockfolder file" option is disabled by default; when enabled, the `.lockfolder` marker file sorts separately from the real folder under Explorer's "group by file type" view (spec §21.6).
 - A lost password cannot be recovered — there is no backdoor.
 
 ### License

@@ -675,7 +675,7 @@ C++（`dllmain.cpp`），CLSID `{A1B2C3D4-E5F6-4789-9ABC-DEF012345678}`。實作
 | 多語言 | 前端靜態文字、後端錯誤代碼（含搬移 Vault／存恢復金鑰失敗訊息） | 完成 |
 | 雲端同步情境測試 | 模擬多裝置同步、衝突情境 | 自動化測試完成；跨裝置人工實測待使用者自行進行 |
 | 資料夾防護（Folder Guard） | 純 ACL 資料夾存取限制（不加密）、共用密碼＋選配 Passkey、右鍵上鎖/解鎖、清單頁管理，見第 21 節 | 完成 |
-| 資料夾防護：雙擊已上鎖資料夾直接解鎖 | Shell Namespace Extension（`CLSID2`／`desktop.ini`）技術路線 | 實驗性功能，程式碼保留但預設關閉，見第 21.6 節 |
+| 資料夾防護：雙擊已上鎖資料夾直接解鎖 | `.lockfolder` 標記檔＋檔案關聯技術路線（取代已放棄的 Shell Namespace Extension） | 邏輯完成、單元測試通過，實際雙擊互動待人工實測，見第 21.6 節 |
 | 軟體更新檢查 | 設定頁一鍵檢查 GitHub Release、下載安裝檔並啟動，見第 22 節 | 完成 |
 | 打包安裝程式 | 對接 mac-style-windows-installer，含 `.locked` 檔案關聯、圖示接入 | 完成，見第 19 節 |
 | CLI 隨裝發布 | `FileLocker.Cli` 打包進 `cli/` 子資料夾，安裝程式透過 `path_target_exe` 加入系統 PATH | 完成，見第 19 節 |
@@ -699,15 +699,15 @@ C++（`dllmain.cpp`），CLSID `{A1B2C3D4-E5F6-4789-9ABC-DEF012345678}`。實作
 
 `FolderGuardAcl.ApplyDeny`/`RemoveDeny`：對目前登入帳號的 SID 加上（或移除）一條拒絕 `ReadAndExecute | Write | Delete`（`FileSystemRights` 組合值 `0x301BF`，剛好等於 .NET `FileSystemRights.Modify`）、`ContainerInherit | ObjectInherit` 繼承旗標的 ACE。不處理父層列舉權限、不搭配隱藏屬性——資料夾在檔案總管裡看得到，雙擊進去才會被拒絕（Windows 原生「存取被拒」錯誤視窗，不攔截、不替換成自訂畫面）。拒絕 `Delete` 權限連帶擋住重新命名（NTFS 底下重新命名一個物件需要對該物件本身的 `Delete` 權限）。
 
-**明確 ACE 永遠優先於繼承 ACE**：這條規則本身是資料夾上一條「明確」的 Deny，會繼承給資料夾內所有既有與新增的子項目。`FolderGuardNamespaceMarker`（見第 21.6 節）需要讓 `desktop.ini` 在套用 Deny 之後仍然可讀，做法是在套用 Deny **之前**，先於 `desktop.ini` 本身加一條明確的 Allow ACE——之後資料夾的繼承 Deny 傳播到這個既有檔案時，會被這條已存在的明確 Allow 蓋過去（Windows ACL 規則：不論 Allow 或 Deny，明確規則永遠比繼承規則優先）。
+這條 Deny 規則會繼承給資料夾內所有既有與新增的子項目（`ContainerInherit | ObjectInherit`）。「雙擊解鎖」用的 `.lockfolder` 標記檔（見第 21.6 節）是資料夾的同層兄弟檔案，不是子項目，不受這條繼承規則影響，寫入/刪除不需要另外處理 ACL。
 
 ACL 拒絕規則掛在目前登入帳號的 SID 上，FileLocker App 自己的行程也是用同一個帳號跑，**加密流程讀取被上鎖的資料夾時一樣會被拒絕存取**，不只是使用者在檔案總管點不進去而已（見第 21.5 節）。
 
 ### 21.3 Shell Extension 整合
 
-`FileLockerShellExtension.dll`（`dllmain.cpp`）在原本「使用 FileLocker 加密」選單項目之外，多插入第二個命令 id（`idCmdFirst + 1`），依 `IsFolderGuardLocked` 現場查詢的 ACL 狀態決定要顯示「將所選資料夾上鎖」還是「將所選資料夾解鎖」：
+`FileLockerShellExtension.dll`（`dllmain.cpp`）在原本「使用 FileLocker 加密」選單項目之外，多插入第二個命令 id（`idCmdFirst + 1`），依 `IsFolderGuardLocked` 現場查詢的防護狀態決定要顯示「將所選資料夾上鎖」還是「將所選資料夾解鎖」：
 
-- `IsFolderGuardLocked`：用 `GetNamedSecurityInfoW` 讀取目前的 DACL，逐條比對是否有一條 `ACCESS_DENIED_ACE`、SID 等於目前使用者、且 `Mask` 包含 `kFolderGuardDeniedRights`（`0x301BF`，必須跟 `FolderGuardAcl.cs` 的 C# 端算出來的值完全一致，兩邊各自獨立判斷，任何一邊改了遮罩值另一邊沒跟著改，選單就會永久誤判）。
+- `IsFolderGuardLocked`：用 `GetNamedSecurityInfoW` 讀取目前的 DACL，逐條比對是否有一條 `ACCESS_DENIED_ACE`、SID 等於目前使用者、且 `Mask` 包含 `kFolderGuardDeniedRights`（`0x301BF`，必須跟 `FolderGuardAcl.cs` 的 C# 端算出來的值完全一致，兩邊各自獨立判斷，任何一邊改了遮罩值另一邊沒跟著改，選單就會永久誤判）。ACL 是唯一的判準，不論有沒有啟用「雙擊解鎖」都一樣（見第 21.6 節）。
 - 「上鎖」/「解鎖」選單項目只在選取的項目**全部是資料夾**時才出現，混到任何一個檔案就整個不顯示（不做「自動忽略檔案只鎖資料夾」這種隱性行為）；選取範圍內鎖定狀態不一致（`Mixed`：有些鎖有些沒鎖）時，兩個都不顯示，避免使用者搞不清楚這次點下去的動作。
 - `InvokeCommand` 依命令 id 組出 `--folder-guard-lock` 或 `--folder-guard-unlock` 命令列旗標啟動 `FileLocker.App.exe`，跟現有「直接傳路徑＝加密」預設行為區隔開（見 `App.xaml.cs` `HandleLaunchArgs`）。
 - 支援多選批次：因為憑證是共用一組，批次上鎖/解鎖不需要處理加密批次的複雜度（第 4.5 節那種「多選時 Passkey 勾選框鎖住」的問題），純粹對每個選取的資料夾各自套用同一組 ACL 規則。
@@ -716,21 +716,33 @@ ACL 拒絕規則掛在目前登入帳號的 SID 上，FileLocker App 自己的�
 
 - **右鍵「上鎖」**：已設定過共用密碼時，直接跳出原生 WPF 小視窗（`FolderGuardConfirmLockWindow`，技術上比照 `PasswordPromptWindow`，不透過 WebView2）確認「你要將『OO』上鎖嗎？」，**上鎖本身不需要輸入密碼**（密碼只用來驗證解鎖身份，不是上鎖的必要條件），確認彈窗本身已足夠防止手滑誤觸。尚未設定過共用密碼則改為開啟主程式、跳到「資料夾防護」分頁引導完成首次設定，設定完成後才真的上鎖這次選取的資料夾。
 - **右鍵「解鎖」**：跳出 `FolderGuardUnlockPromptWindow`，有設定 Passkey 就優先跳 Windows Hello 驗證，使用者把驗證視窗關掉才退回密碼輸入畫面（比照第 14.4 節 `PasswordPromptWindow` 遇到 Passkey 項目時的既有互動模式）。右鍵一定顯示「解鎖」代表已經是鎖定狀態，不會有「還沒設定過」要導去首次設定的分支。
-- **分頁內清單頁操作**：獨立分頁管理所有上鎖中的資料夾，可個別解鎖、一次全部解鎖（`UnlockAllAsync`）；已解鎖項目可「前往資料夾」直接開啟總管，或「再次上鎖」恢復保護。健壯性檢查：清單頁載入時針對索引裡每個路徑即時檢查 ACL 是否真的有對應的拒絕規則，不符合就視為「已不在防護中」，比照 `VaultManager.ScanAll()`「以磁碟實際狀態為準，索引只是加速用途」的既有設計原則。
+- **分頁內清單頁操作**：獨立分頁管理所有上鎖中的資料夾，可個別解鎖、一次全部解鎖（`UnlockAllAsync`）；已解鎖項目可「前往資料夾」直接開啟總管，或「再次上鎖」恢復保護。健壯性檢查：清單頁載入時針對索引裡每個路徑用 `FolderGuardProtection.IsActive`（等同直接查 ACL）即時檢查，不符合就視為「已不在防護中」，比照 `VaultManager.ScanAll()`「以磁碟實際狀態為準，索引只是加速用途」的既有設計原則。
 
 ### 21.5 與加密流程的互動
 
 `LockService` 建構時透過委派 `getGuardedFolderPaths` 得知目前哪些資料夾正在防護中（見 `App.xaml.cs`），加密流程一開始掃描到選取範圍內含正在上鎖的資料夾，會先跳出彈窗列出被擋的子資料夾清單，要求先解鎖才能繼續（驗證方式同第 21.4 節），不會讓加密流程半途讀取 ACL 拒絕的資料夾而失敗。已解鎖並被加密流程消耗（打包進外層 zip）的資料夾，在資料夾防護索引裡對應的項目也會一併清除。
 
-### 21.6 實驗性功能：雙擊已上鎖資料夾直接解鎖（預設關閉）
+### 21.6 選配功能：雙擊已上鎖資料夾直接解鎖（`.lockfolder` 標記檔）
 
-`AppSettings`／`FolderGuardData` 的 `DoubleClickUnlockEnabled`（預設 `false`）控制的選配功能：雙擊一個已上鎖的資料夾，不看到 Windows 原生「存取被拒」畫面，而是直接跳出解鎖確認彈窗。技術路線是 Windows Shell Namespace Extension：
+`AppSettings`／`FolderGuardData` 的 `DoubleClickUnlockEnabled`（預設 `false`）控制的選配功能：雙擊一個已上鎖的資料夾，不看到 Windows 原生「存取被拒」畫面，而是直接跳出解鎖確認彈窗。
 
-- `FolderGuardNamespaceMarker.Apply`/`Remove`（C#）在上鎖/解鎖時貼上/撕下標記——寫入 `desktop.ini`（`[.ShellClassInfo]` 段落同時寫 `CLSID=` 與 `CLSID2=` 兩個鍵；`CLSID2` 才是 Windows Vista 之後的 Explorer 用來做完整 `IShellFolder` 綁定的鍵，舊式的 `CLSID=` 單獨存在時現代 Explorer 不會拿它做完整綁定），並依 Explorer 對「desktop.ini 客製化資料夾」的長年慣例把資料夾本身設成 `System | ReadOnly` 屬性（`ReadOnly` 在資料夾身上被借用做「有客製化設定要讀 desktop.ini」的標記，不是真的唯讀語意）。
-- `folderguard_namespace.cpp`／`folderguard_namespace.h`：獨立的 COM `IShellFolder` 實作（`FolderGuardNamespaceFolder`），CLSID `{2A4376E0-C5FC-4126-8ACD-9FC8AA377AC1}`，跟右鍵選單的 `FileLockerShellExtClass` 是完全不同的 COM 類別，由同一個 `FileLockerShellExtension.dll` 匯出。`GetAttributesOf` 需要回報 `SFGAO_FOLDER | SFGAO_FILESYSTEM | SFGAO_FILESYSANCESTOR`（一般檔案系統資料夾都會同時回報這三個旗標），只回報 `SFGAO_FOLDER` 會讓 Explorer 把它當成不可操作的抽象項目，雙擊完全沒有反應。
-- `ShellExtensionRegistrar.RegisterNamespaceShellFolder`：CLSID 底下額外的 `ShellFolder` 子機碼（`Attributes` DWORD 值需要跟上面的 `GetAttributesOf` 回傳值一致）是 Explorer 判斷「這個 CLSID 是命名空間資料夾」的必要登記，跟右鍵選單的 `ContextMenuHandlers` 登記完全獨立。
+**放棄過的技術路線：Windows Shell Namespace Extension**。第一版做法是用 `desktop.ini` 的 `CLSID2` 鍵把資料夾本身偽裝成一個自訂 COM `IShellFolder` 物件（`folderguard_namespace.cpp`／`folderguard_namespace.h`，獨立 CLSID `{2A4376E0-C5FC-4126-8ACD-9FC8AA377AC1}`），攔截 Explorer 對這個資料夾的瀏覽行為。實測連續踩到兩個問題：
 
-**維持預設關閉、不再繼續開發測試的原因**：這個技術路線在實測中曾經讓 `explorer.exe` 整個行程進入無法從任何權限層級（包含使用者自己互動式提權的 PowerShell）終止的死結狀態，只能靠重開機解除——用 Process Monitor 追蹤確認 Explorer 對命名空間 CLSID 的解析序列本身正常，但命名空間物件被雙擊觸發之後的某個環節導致行程整個卡死，這是一個系統層級的穩定性風險，跟「防隨手瀏覽」這個功能定位要求的可靠度不成比例。程式碼保留在專案裡（`DoubleClickUnlockEnabled` 預設 `false`，不影響現有右鍵上鎖/解鎖功能），但除非之後有新的證據或不同的技術路線，不建議重新開啟並繼續投入測試資源。
+1. **資料夾同時偽裝成可瀏覽物件、又套 Deny ACL 拒絕存取**，讓 `explorer.exe` 整個行程進入無法從任何權限層級終止的死結狀態，只能重開機解除——根因診斷指向 Explorer 原生 `CFSFolder` 解析這個資料夾時，會先做自己的存取檢查，撞到 Deny ACE 時內部同步跳出的權限提示對話框邏輯，完全不在我們的程式碼控制範圍內。
+2. 移除 ACL、只靠命名空間物件自己擋下瀏覽之後，死結問題解決，但改成**右鍵選單整個消失**（連跟資料夾防護無關的「加密」選項也一起不見）——`CLSID2` 一旦接管資料夾身分，Explorer 對右鍵選單的處理也跟著整個改道，不再走標準的 `Directory\shellex\ContextMenuHandlers` 選單鏈，而我們自己在命名空間物件裡提供的 `IContextMenu`（`FolderGuardNamespaceContextMenu`）也沒有被如預期呼叫到。
+
+兩次實測、兩種截然不同的失敗模式，都出在 Explorer 對 Shell Namespace Extension 缺乏官方文件保證的內部行為，不是我們自己的 COM 邏輯寫錯了什麼——判斷這條技術路線不值得繼續投入，`folderguard_namespace.cpp`／`.h` 已整個移除，`ShellExtensionRegistrar` 也不再註冊這組 CLSID。
+
+**目前採用的技術路線：檔案關聯標記檔**，跟加密功能的 `.locked` 指標檔走同一套已經證明穩定的機制，不需要任何 COM 命名空間物件：
+
+- `FolderGuardUnlockMarkerFile`（C#）：上鎖時（若啟用這個選配功能）在資料夾旁邊、同一層額外建立一個 `{資料夾名稱}.lockfolder` 檔案，內容純文字記錄真正資料夾的完整路徑（不是靠檔名反推，資料夾改名或搬動不會讓標記檔失效）。這個標記檔是資料夾的**同層兄弟**，不是資料夾內部的東西，寫入/刪除完全不受資料夾本身的 ACL 影響，不需要像舊版 `desktop.ini` 那樣搶在 ACL 生效前寫入、還要另外補一條 Allow 規則。
+- `FolderGuardProtection.Apply`/`Remove`/`SwitchMode`：ACL 現在永遠是唯一的保護來源，兩種模式（啟用/不啟用雙擊解鎖）保護強度完全一樣，差別只在要不要多放這個標記檔——不像舊版方案需要在 ACL 與命名空間標記之間二選一、還要處理兩者互斥切換的邊界情況。
+- `ShellExtensionRegistrar.RegisterLockFolderMarkerAssociation`：App 啟動時在 `HKEY_CURRENT_USER\Software\Classes\.lockfolder` 底下自我註冊標準的副檔名開啟動作（純資料，不是 COM 登錄），指到 `FileLocker.App.exe --folder-guard-unlock-marker "%1"`，圖示直接借用主程式執行檔本身內嵌的圖示，不需要另外準備 `.ico` 資源。
+- `App.xaml.cs` 的 `HandleFolderGuardUnlockMarkerLaunch`：收到的參數是標記檔自己的路徑，讀出裡面記錄的真正資料夾路徑後，轉呼叫既有的 `HandleFolderGuardUnlockLaunch`（跟右鍵選單「解鎖」共用同一套流程）；讀不到的標記檔（被搬移/刪除/內容損毀）直接忽略，不中止批次裡其他還讀得到的項目。
+
+**這個做法的代價**：資料夾旁邊多了一個額外的 `.lockfolder` 項目，在「依檔案類型分組」的檢視下會被歸到跟資料夾不同的分組，不是原本設想的「雙擊資料夾本身」那麼無縫——這是使用者在確認方向時已經知情接受的取捨，換來的是不用再碰任何 COM／`IShellFolder` 程式碼，風險大幅降低，且 ACL 保護強度完全不受影響（舊版命名空間方案為了避開死結，一度必須放棄 ACL，保護範圍縮小成「只擋 Explorer 雙擊」，這個做法不需要這個犧牲）。
+
+**驗證狀態**：C# 端邏輯已補上單元測試（`FolderGuardDoubleClickModeTests.cs`）並全數通過，Shell Extension DLL 移除命名空間擴充後重新編譯無警告無錯誤，但**實際雙擊互動尚未經過完整人工實測驗證**。
 
 ---
 
@@ -750,7 +762,7 @@ ACL 拒絕規則掛在目前登入帳號的 SID 上，FileLocker App 自己的�
 - **CLI 不涵蓋 Passkey**：設計決定，見第 15 節。`KeyCredentialManager` 一定會跳出 Windows Hello 系統 UI，這跟「無 GUI 環境可操作」的 CLI 存在目的直接衝突；未來若要支援，應為獨立指令，不塞進 `--encrypt` 裡。
 - **沒有數位簽章，也沒有執行檔完整性驗證機制**：詳見第 19 節的評估與取捨——需要另外採購程式碼簽署憑證，不是安裝程式工具本身能解決的事；「程式自己在啟動時檢查自身雜湊值」評估後不採用，因為攻擊者能竄改執行檔內容的同時，也能連檢查邏輯本身一起改掉，只能擋住意外損毀、擋不住真正有心的竄改，容易給人錯誤的安全感。安裝檔與更新下載回來的安裝檔執行時，Windows SmartScreen 可能會跳出警告。
 - **軟體更新檢查僅支援透過正式安裝版比對版本**：見第 22 節，需要本機存在 `installer_config.json`（僅由 mac-style-windows-installer 安裝時放入）且能連上 `api.github.com`；直接以原始碼執行的開發版不會顯示版本資訊，這不算錯誤情境。
-- **資料夾防護的「雙擊已上鎖資料夾直接解鎖」維持實驗性、預設關閉**：見第 21.6 節，實測曾經在特定情境下造成 `explorer.exe` 整個行程死結（需要重開機才能解除），是系統層級的穩定性風險，跟「防隨手瀏覽」這個功能定位要求的可靠度不成比例，因此不繼續投入開發測試資源，這是刻意暫緩的決定，不是遺漏。
+- **資料夾防護「雙擊已上鎖資料夾直接解鎖」啟用時，保護方式多一個額外的 `.lockfolder` 檔案**：見第 21.6 節，這個標記檔在「依檔案類型分組」的檔案總管檢視下會被歸到跟資料夾不同的分組——是確認技術方向時已知情接受的取捨，換來的是不需要任何 COM／`IShellFolder` 程式碼、ACL 保護強度也不受影響。
 
 ---
 
@@ -759,6 +771,7 @@ ACL 拒絕規則掛在目前登入帳號的 SID 上，FileLocker App 自己的�
 ### 24.1 進行中
 
 - **雲端同步跨裝置人工實測**：見第 11.2 節，目前僅完成自動化測試（模擬多裝置同步、衝突情境），跨裝置的完整人工實測待使用者自行進行。
+- **雙擊已上鎖資料夾直接解鎖的實際互動驗證**：見第 21.6 節，`.lockfolder` 標記檔機制的 C# 端邏輯已完成並通過單元測試，但實際雙擊標記檔跳出解鎖彈窗的互動流程尚待完整人工實測。
 
 ### 24.2 已完成之待辦
 
