@@ -1,8 +1,8 @@
 {
   "app_dir": "D:\\Github\\FileLocker_專案\\FileLocker\\src\\FileLocker.App\\bin\\Release\\net10.0-windows10.0.19041.0\\publish",
-  "png_icon": "D:\\Github\\FileLocker_專案\\FileLocker\\installer\\filelocker_drag_icon.png",
-  "ico_icon": "D:\\Github\\FileLocker_專案\\FileLocker\\src\\FileLocker.App\\icon.ico",
-  "doc_icon": "",
+  "png_icon": "D:\\Github\\FileLocker_專案\\icon.png",
+  "ico_icon": "D:\\Github\\FileLocker_專案\\icon.ico",
+  "doc_icon": "D:\\Github\\FileLocker_專案\\Locked_File.ico",
   "app_name": "FileLocker",
   "folder_name": "FileLocker",
   "version": "1.1.1",

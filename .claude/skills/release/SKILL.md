@@ -10,7 +10,7 @@ description: 依照這個專案實際的流程準備一次新版本發布——�
 - Release Notes 是**單一檔案內雙語**（`RELEASE_NOTES_vX.Y.Z.md`，先 `## 繁體中文` 後 `## English`），不是分成 `README.md`／`README.zh-CN.md` 兩個檔案——比照 [`RELEASE_NOTES_v1.1.0.md`](../../../RELEASE_NOTES_v1.1.0.md) 的段落結構（亮點 + 已知限制，各自中英文對應）。
 - 這個 repo 確實有在打 git tag（`v1.0.0`、`v1.1.0`），commit 訊息慣例是 `feat:`／`fix:`／`docs:`／`refactor:`／`style:` 開頭，但不是嚴格的 Conventional Commits 格式（後面接的是完整中文句子說明「為什麼」，不是簡短英文摘要）。
 - **正式安裝程式的打包不在這個 repo 裡完成，但可以用 `mswi-cli` 自動化**——技術規格文件第 19 節說明是對接另一個獨立專案 [mac-style-windows-installer](https://github.com/Lai-xuan/mac-style-windows-installer)，這個 skill 負責 repo 內的部分（程式碼、測試、文件、tag）。打包本身現在透過該專案的 `mswi-cli pack --config installer/filelocker_installer.json` 完成，設定檔已經檢查進這個 repo（見步驟 8），不用再進另一個專案手動跑 GUI。上傳 GitHub Release 附件仍然是手動步驟。
-- 這個環境沒有安裝 `gh` CLI，不要假設它存在——GitHub Release 草稿的步驟用網頁連結提示使用者手動做。
+- `gh` CLI 已安裝並登入（`Lai-xuan` 帳號，裝在 `C:\Program Files\GitHub CLI\gh.exe`，PATH 找不到就用完整路徑），可以用 `gh release create` 自動建立 GitHub Release、上傳附件。**但發布前一定要先把要執行的指令列給使用者確認過，取得明確同意才能真的執行**——這是使用者明確要求的規則，不是預設的謹慎行事而已，不能省略這個確認步驟。執行前也要先用 `gh release list --repo Lai-xuan/FileLocker` 確認這個版本還沒被使用者手動在網頁上發布過，避免重複。
 
 ## 步驟
 
@@ -31,10 +31,10 @@ description: 依照這個專案實際的流程準備一次新版本發布——�
    `installer/filelocker_installer.json` 裡的 `app_dir`／`png_icon`／`ico_icon` 目前是這台機器上的絕對路徑（`mswi-cli` 會把相對路徑誤判成相對於它自己的安裝目錄，不是相對於執行指令當下的工作目錄，只能用絕對路徑繞過），**在不同機器上執行前要先確認這幾個路徑仍然正確**。
    `mswi-cli` 現在裝在使用者可寫的路徑（`%LOCALAPPDATA%\Programs\mac-style-windows-installer`，不再是 `C:\Program Files`），不需要系統管理員權限就能跑。`mswi-cli` 找不到就用完整路徑 `%LOCALAPPDATA%\Programs\mac-style-windows-installer\mswi-cli.exe`（PATH 沒吃到新安裝時的備援）。這段狀況以 `CLI_USAGE.md` 當下內容為準，工具安裝位置以後還可能再變。
    編譯完成後，輸出在 `mswi-cli` 自己的 `dist\` 資料夾（例如 `%LOCALAPPDATA%\Programs\mac-style-windows-installer\dist\FileLocker_vX.Y.Z_setup.exe`），複製一份到 `d:\Github\FileLocker_專案\vX.Y.Z\`（比照既有 v1.0.0／v1.1.0／v1.1.1／v1.1.2 的擺放慣例）。
-9. **建立 GitHub Release**：回到 GitHub 這個 repo 的 [Releases 頁面](https://github.com/Lai-xuan/FileLocker/releases) 手動建立 Release、貼上 Release Notes、上傳步驟 8 產生的安裝檔——這個環境沒有 `gh` CLI，不要嘗試自動化這一步。
+9. **建立 GitHub Release**：先 `gh release list --repo Lai-xuan/FileLocker` 確認這個版本還沒發布過。沒發布過的話，把要跑的指令（大致是 `gh release create vX.Y.Z <安裝檔路徑> --title "FileLocker vX.Y.Z" --notes-file RELEASE_NOTES_vX.Y.Z.md`）列出來給使用者看過、明確同意後才執行——不能自己直接發布。使用者也可能自己先在網頁上手動建立了，跑之前的確認步驟就會發現，發現的話就不用再跑 `gh release create`，直接跟使用者核對內容（Release Notes、附件檔名/大小）對不對即可。
 
 ## 不做的事
 
 - 不自動 push（tag 或 commit）——一律先問。
-- 不假設 `gh` CLI 存在。
+- 不用 `gh release create` 未經確認就直接發布——一律先列出指令給使用者看過同意。
 - 不把 Release Notes 拆成分開的中英文檔案——這個 repo 的慣例是單一檔案。
