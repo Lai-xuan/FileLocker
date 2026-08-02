@@ -12,7 +12,7 @@
   - 解鎖成功後會自動用檔案總管開啟該資料夾，不用再手動導覽過去。
   - `.lockfolder` 換上專屬圖示（不再借用主程式圖示）。
   - 這個選項預設仍是關閉狀態，需要在資料夾防護設定頁手動開啟；已知取捨是 `.lockfolder` 標記檔會讓資料夾在檔案總管「依檔案類型分組」檢視下跟真正的資料夾分開排列。
-- **介面文字與排版**：進階開關的說明提示（滑鼠移過「i」圖示跳出的內容）原本是一整段擠在窄欄位裡的長句，這次拆成前言＋條列重點並加寬欄位，不再是一大片文字牆；「使用說明」彈窗的資料夾防護章節也補上這個選項的說明。
+- **介面文字與排版**：進階開關的說明提示（滑鼠移過「i」圖示跳出的內容）原本是一整段擠在窄欄位裡的長句，這次拆成前言＋條列重點並加寬欄位，不再是一大片文字牆；「使用說明」彈窗的資料夾防護章節同樣補上這個選項的說明，並拆成多個段落，不再是擠成一團的長句。
 - **打包設定**：安裝程式圖示改用正式品牌圖示（`icon.png`／`icon.ico`／`Locked_File.ico`），取代先前打包時暫用的圖示。
 - **技術規格文件**：依專案撰寫規範重新整理，已知限制與待辦事項統一移到文件最末尾兩個獨立章節。
 
@@ -37,7 +37,7 @@ Reworked Folder Guard's "double-click to unlock a locked folder" mechanism and m
   - The folder now opens automatically in File Explorer once unlocked, no manual navigation needed.
   - `.lockfolder` now has its own dedicated icon instead of borrowing the main app's icon.
   - The option is still disabled by default and must be turned on from the Folder Guard settings page. Known trade-off: the `.lockfolder` marker file sorts separately from the real folder under Explorer's "group by file type" view.
-- **Interface text and layout**: the advanced toggle's info tooltip (hovering the "i" icon) used to cram one long sentence into a narrow box; it's now split into an intro line plus bullet points in a wider box, no longer a wall of text. The Folder Guard section of the in-app Help dialog was also updated to cover this option.
+- **Interface text and layout**: the advanced toggle's info tooltip (hovering the "i" icon) used to cram one long sentence into a narrow box; it's now split into an intro line plus bullet points in a wider box, no longer a wall of text. The Folder Guard section of the in-app Help dialog was likewise updated to cover this option and broken into multiple paragraphs instead of one dense block.
 - **Packaging**: the installer now uses the official brand icons (`icon.png` / `icon.ico` / `Locked_File.ico`) instead of the placeholder icons used in earlier packaging.
 - **Technical spec document**: restructured per the project's documentation conventions, with known limitations and to-do items consolidated into two dedicated sections at the end of the document.
 

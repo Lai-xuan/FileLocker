@@ -20,8 +20,8 @@ description: 依照這個專案實際的流程準備一次新版本發布——�
 4. **決定版本號**：讀 `git tag` 列出目前最新的版本，跟使用者確認這次是 patch／minor／major，不要自己猜。
 5. **產生 Release Notes 草稿**：`git log <上一個 tag>..HEAD --oneline` 整理這段期間的變更，依照 [`RELEASE_NOTES_v1.1.0.md`](../../../RELEASE_NOTES_v1.1.0.md) 的雙語段落結構寫成新的 `RELEASE_NOTES_vX.Y.Z.md`（亮點／已知限制，中文在前、英文在後，兩邊內容要對等——這個對話稽核過，這兩個檔案目前逐條對應，維持這個標準）。同時檢查 `README.md` 需不需要跟著更新（新功能通常要）。
 6. **Commit**：訊息比照這個 repo 現有風格（`feat:`／`docs:` 等前綴 + 完整中文說明），文件變更可以跟程式碼變更分開兩個 commit（比照這個對話稍早的做法）。
-7. **打 tag**：`git tag vX.Y.Z`，跟使用者確認要不要 push（tag 跟 commit 都是視覺化「發布」的動作，push 前一定要問，不要自動推）。
-8. **打包安裝程式**：**開始之前先 Read `d:\Github\mac-style-windows-installer_專案\mac-style-windows-installer\CLI_USAGE.md`**——mswi-cli 用法隨時可能改版，使用者會持續把最新用法寫回這份文件，不要憑記憶或這份 skill 裡舊的範例假設。需要更完整脈絡（例如安裝路徑、跟 GUI 的對照）再讀同目錄下的 `使用說明書.md`。
+7. **打 tag**：跟使用者確認要不要打這個 tag、要不要 push（`git tag vX.Y.Z` 本身跟 push 都是視覺化「發布」的動作，兩個都要先問，不要自動打／自動推）。
+8. **打包安裝程式**：這一步不用跟使用者確認，執行 release skill 時直接自動打包——這是使用者明確要求的規則（只有建立 GitHub Release、push、打 tag 這三件事才需要先問）。**開始之前先 Read `d:\Github\mac-style-windows-installer_專案\mac-style-windows-installer\CLI_USAGE.md`**——mswi-cli 用法隨時可能改版，使用者會持續把最新用法寫回這份文件，不要憑記憶或這份 skill 裡舊的範例假設。需要更完整脈絡（例如安裝路徑、跟 GUI 的對照）再讀同目錄下的 `使用說明書.md`。
 
    `dotnet publish src/FileLocker.App/FileLocker.App.csproj -c Release` 先確保 `publish/`（含 `cli/` 子資料夾）是最新的，再跑（以下是目前已知的範例，flag 名稱／JSON 欄位如果跟剛讀到的 `CLI_USAGE.md` 對不上，一律以文件為準）：
    ```
@@ -35,6 +35,8 @@ description: 依照這個專案實際的流程準備一次新版本發布——�
 
 ## 不做的事
 
-- 不自動 push（tag 或 commit）——一律先問。
+- 不自動打 tag、不自動 push——一律先問。
 - 不用 `gh release create` 未經確認就直接發布——一律先列出指令給使用者看過同意。
 - 不把 Release Notes 拆成分開的中英文檔案——這個 repo 的慣例是單一檔案。
+
+需要確認的只有這三件事：打 tag、push、建立 GitHub Release。打包安裝程式（步驟 8）不用問，直接執行。
