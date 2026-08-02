@@ -29,8 +29,8 @@ description: 依照這個專案實際的流程準備一次新版本發布——�
    ```
    `--version`／`--exe-name` 覆蓋 JSON 裡的預設值，確保檔名跟版本號對得上這次發布，JSON 本身不用每次改。
    `installer/filelocker_installer.json` 裡的 `app_dir`／`png_icon`／`ico_icon` 目前是這台機器上的絕對路徑（`mswi-cli` 會把相對路徑誤判成相對於它自己的安裝目錄，不是相對於執行指令當下的工作目錄，只能用絕對路徑繞過），**在不同機器上執行前要先確認這幾個路徑仍然正確**。
-   以下兩點是目前（`mswi-cli` 還裝在 `C:\Program Files` 底下時）的狀況，依 `CLI_USAGE.md` 當下內容判斷是否仍然成立，使用者提到之後會把工具搬到不需要提權的路徑，屆時可能已經過期：`mswi-cli` 找不到就用完整路徑 `C:\Program Files\mac-style-windows-installer\mswi-cli.exe`；這一步需要系統管理員權限（連暫存編譯檔案都要寫回安裝目錄），沒有提權就先把指令交給使用者在系統管理員終端機執行，不要跳過或悄悄失敗。
-   編譯完成後，輸出在 `mswi-cli` 自己的 `dist\` 資料夾（例如 `C:\Program Files\mac-style-windows-installer\dist\FileLocker_vX.Y.Z_setup.exe`），複製一份到 `d:\Github\FileLocker_專案\vX.Y.Z\`（比照既有 v1.0.0／v1.1.0／v1.1.1 的擺放慣例）。
+   `mswi-cli` 現在裝在使用者可寫的路徑（`%LOCALAPPDATA%\Programs\mac-style-windows-installer`，不再是 `C:\Program Files`），不需要系統管理員權限就能跑。`mswi-cli` 找不到就用完整路徑 `%LOCALAPPDATA%\Programs\mac-style-windows-installer\mswi-cli.exe`（PATH 沒吃到新安裝時的備援）。這段狀況以 `CLI_USAGE.md` 當下內容為準，工具安裝位置以後還可能再變。
+   編譯完成後，輸出在 `mswi-cli` 自己的 `dist\` 資料夾（例如 `%LOCALAPPDATA%\Programs\mac-style-windows-installer\dist\FileLocker_vX.Y.Z_setup.exe`），複製一份到 `d:\Github\FileLocker_專案\vX.Y.Z\`（比照既有 v1.0.0／v1.1.0／v1.1.1／v1.1.2 的擺放慣例）。
 9. **建立 GitHub Release**：回到 GitHub 這個 repo 的 [Releases 頁面](https://github.com/Lai-xuan/FileLocker/releases) 手動建立 Release、貼上 Release Notes、上傳步驟 8 產生的安裝檔——這個環境沒有 `gh` CLI，不要嘗試自動化這一步。
 
 ## 不做的事
