@@ -4,12 +4,11 @@
 #include <string>
 #include <vector>
 
-// dllmain.cpp 裡定義（DllMain 裡指派），folderguard_namespace.cpp 也需要用來找
-// FileLocker.App.exe 的路徑——兩個 .cpp 共用同一個 DLL 模組控制代碼。
+// dllmain.cpp 裡定義（DllMain 裡指派），這個標頭裡的 GetFileLockerAppPath 也需要用來找
+// FileLocker.App.exe 的路徑。
 extern HMODULE g_hModule;
 
-// dllmain.cpp 裡定義，DllCanUnloadNow 用來判斷 DLL 還有沒有物件存活——兩個 .cpp
-// 建立的所有 COM 物件都要共用同一個計數器，不能各自獨立一份。
+// dllmain.cpp 裡定義，DllCanUnloadNow 用來判斷 DLL 還有沒有物件存活。
 extern LONG g_cDllRef;
 
 /// <summary>
@@ -89,37 +88,4 @@ inline std::wstring GetFileLockerAppPath()
 inline bool IsSystemUiChinese()
 {
     return PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_CHINESE;
-}
-
-/// <summary>
-/// 啟動 FileLocker.App.exe 並帶上指定的旗標與單一路徑參數——右鍵選單（dllmain.cpp）跟
-/// 雙擊解鎖（folderguard_namespace.cpp）都是「一個命令、一個路徑」的簡單情境，不需要
-/// dllmain.cpp InvokeCommand 那套多選、暫存清單檔的完整邏輯，直接組命令列即可。
-/// </summary>
-inline bool LaunchFileLockerApp(const std::wstring& argFlag, const std::wstring& path, HWND ownerHwnd)
-{
-    std::wstring appPath = GetFileLockerAppPath();
-    if (appPath.empty())
-    {
-        MessageBoxW(ownerHwnd, L"找不到 FileLocker.App.exe，請確認主程式已經編譯過。", L"FileLocker", MB_OK | MB_ICONERROR);
-        return false;
-    }
-
-    std::wstring commandLine = QuoteArgument(appPath) + L" " + argFlag + L" " + QuoteArgument(path);
-
-    STARTUPINFOW si = { sizeof(si) };
-    PROCESS_INFORMATION pi = {};
-
-    std::vector<wchar_t> mutableCmd(commandLine.begin(), commandLine.end());
-    mutableCmd.push_back(L'\0');
-
-    if (CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
-    {
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-        return true;
-    }
-
-    MessageBoxW(ownerHwnd, L"啟動 FileLocker 失敗。", L"FileLocker", MB_OK | MB_ICONERROR);
-    return false;
 }

@@ -1073,8 +1073,9 @@ async function refreshFolderGuardList() {
   folderGuardItems.value = data.items
 }
 
-// 「雙擊已上鎖資料夾直接解鎖」是實驗性功能（跑在 explorer.exe 行程內的命名空間擴充，見規劃
-// 文件），不需要身份驗證——單純是操作體驗開關，切換失敗也只顯示 toast，不影響其他功能。
+// 「雙擊已上鎖資料夾直接解鎖」開啟後會在資料夾旁邊多放一個 .lockfolder 標記檔（見
+// FolderGuardUnlockMarkerFile），不需要身份驗證——單純是操作體驗開關，切換失敗也只顯示
+// toast，不影響其他功能。
 async function toggleFolderGuardDoubleClickUnlockAction(event) {
   const enabled = event.target.checked
   isTogglingFolderGuardDoubleClickUnlock.value = true
@@ -2494,7 +2495,14 @@ function historyDetailText(entry) {
                   <span>{{ t('folderGuard.doubleClickUnlockLabel') }}</span>
                   <span class="info-tooltip" tabindex="0">
                     <span class="info-tooltip__icon">i</span>
-                    <span class="info-tooltip__bubble">{{ t('folderGuard.doubleClickUnlockDetail') }}</span>
+                    <span class="info-tooltip__bubble info-tooltip__bubble--wide">
+                      <p class="info-tooltip__intro">{{ t('folderGuard.doubleClickUnlockDetailIntro') }}</p>
+                      <ul class="info-tooltip__list">
+                        <li>{{ t('folderGuard.doubleClickUnlockDetailPoint1') }}</li>
+                        <li>{{ t('folderGuard.doubleClickUnlockDetailPoint2') }}</li>
+                        <li>{{ t('folderGuard.doubleClickUnlockDetailPoint3') }}</li>
+                      </ul>
+                    </span>
                   </span>
                 </label>
               </div>
@@ -3236,6 +3244,28 @@ textarea.text-input {
 .info-tooltip:focus-visible .info-tooltip__bubble {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
+}
+
+/* 內容比一般單句說明長很多（多重點、分段落）的情境用——加寬 bubble、把條列項目排版成
+   有間距的清單，不然一長串文字擠在窄欄位裡會變成密密麻麻的文字牆，很難閱讀。 */
+.info-tooltip__bubble--wide {
+  width: 320px;
+}
+
+.info-tooltip__intro {
+  margin: 0 0 0.5rem;
+}
+
+.info-tooltip__list {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.info-tooltip__list li {
+  margin: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {

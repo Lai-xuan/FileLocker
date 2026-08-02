@@ -44,9 +44,11 @@ public class FolderGuardStore
 
     /// <summary>
     /// 對應規劃文件第 9 節「健壯性檢查」：以磁碟目前實際的 ACL 狀態為準，不照單全收儲存檔內容。
-    /// Locked 狀態的項目如果路徑不存在、或 ACL 拒絕規則已經不在了（例如使用者自己在檔案總管改回
-    /// 權限），視為「已不在防護中」，直接從清單移除並同步寫回，不留殘留紀錄；Unlocked 狀態的項目
-    /// 不做 ACL 檢查——它本來就沒有對應的 ACL 規則要驗證，只是使用者還沒手動清掉的紀錄。
+    /// 用 <see cref="FolderGuardProtection.IsActive"/>（目前等同直接查 ACL）而不是自己重複一份
+    /// 判斷邏輯。Locked 狀態的項目如果路徑不存在、或 ACL 拒絕規則已經不在了（例如使用者自己在
+    /// 檔案總管改回權限），視為「已不在防護中」，直接從清單移除並同步寫回，不留殘留紀錄；
+    /// Unlocked 狀態的項目不做這個檢查——它本來就沒有對應的 ACL 規則要驗證，只是使用者還沒手動
+    /// 清掉的紀錄。
     /// </summary>
     public IReadOnlyList<FolderGuardEntry> ListWithSelfHeal()
     {
@@ -56,8 +58,7 @@ public class FolderGuardStore
 
         foreach (var entry in data.Entries)
         {
-            if (entry.Status == FolderGuardStatus.Locked
-                && (!Directory.Exists(entry.Path) || !FolderGuardAcl.IsDenyRuleActive(entry.Path)))
+            if (entry.Status == FolderGuardStatus.Locked && !FolderGuardProtection.IsActive(entry.Path))
             {
                 changed = true;
                 continue;

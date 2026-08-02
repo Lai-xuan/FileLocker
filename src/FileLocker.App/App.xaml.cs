@@ -165,6 +165,11 @@ public partial class App : Application
     private const string FolderGuardLockArgFlag = "--folder-guard-lock";
     private const string FolderGuardUnlockArgFlag = "--folder-guard-unlock";
 
+    // 雙擊 `.lockfolder` 標記檔時 ShellExtensionRegistrar 註冊的檔案關聯用這個旗標啟動——
+    // 帶進來的是標記檔自己的路徑，不是真正的資料夾路徑，要先讀出標記檔內容轉換過，
+    // 才能沿用既有的 HandleFolderGuardUnlockLaunch（見 FolderGuardUnlockMarkerFile 上的說明）。
+    private const string FolderGuardUnlockMarkerArgFlag = "--folder-guard-unlock-marker";
+
     /// <summary>
     /// 「旗標 → 該開哪個資料夾防護進入點」的對應表：之後新增 Folder Guard 命令列旗標，
     /// 只需要在這裡加一列，不需要去改 HandleLaunchArgs 本身的控制流程。
@@ -178,7 +183,11 @@ public partial class App : Application
 
         // 右鍵「解鎖」：解鎖一定要驗證身份，不會有「還沒設定過」要導去首次設定的分支——
         // 右鍵會顯示「解鎖」代表這些資料夾已經是鎖定狀態，資料夾防護一定已經設定過。
-        [FolderGuardUnlockArgFlag] = HandleFolderGuardUnlockLaunch,
+        [FolderGuardUnlockArgFlag] = paths => HandleFolderGuardUnlockLaunch(paths),
+
+        // 雙擊 `.lockfolder` 標記檔：帶進來的是標記檔路徑，先轉成標記檔裡記錄的真正資料夾路徑，
+        // 再沿用同一套解鎖流程。
+        [FolderGuardUnlockMarkerArgFlag] = HandleFolderGuardUnlockMarkerLaunch,
     };
 
     private void HandleLaunchArgs(string[] args)
@@ -248,17 +257,33 @@ public partial class App : Application
         confirmWindow.Activate();
     }
 
-    private void HandleFolderGuardUnlockLaunch(List<string> paths)
+    private void HandleFolderGuardUnlockLaunch(List<string> paths, bool openFoldersAfterUnlock = false)
     {
         if (paths.Count == 0)
         {
             return;
         }
 
-        var unlockWindow = new FolderGuardUnlockPromptWindow(paths, _folderGuardService!, _settings!.Theme);
+        var unlockWindow = new FolderGuardUnlockPromptWindow(paths, _folderGuardService!, _settings!.Theme, openFoldersAfterUnlock);
         unlockWindow.Closed += (_, _) => ShutdownIfNoWindowsRemain();
         unlockWindow.Show();
         unlockWindow.Activate();
+    }
+
+    /// <summary>雙擊 `.lockfolder` 標記檔的入口：帶進來的每個路徑都是標記檔本身，不是真正的
+    /// 資料夾——先讀出標記檔內容轉成資料夾路徑，讀不到（檔案被搬移/刪除/內容損毀）的直接
+    /// 忽略那一筆，不中止其他還讀得到的項目，再沿用既有的 <see cref="HandleFolderGuardUnlockLaunch"/>。
+    /// 這個入口點的使用者意圖是「打開這個資料夾」，解鎖成功後要接著開啟資料夾本身
+    /// （見 FolderGuardUnlockPromptWindow 建構子上的說明），跟右鍵選單「解鎖」不同。</summary>
+    private void HandleFolderGuardUnlockMarkerLaunch(List<string> markerPaths)
+    {
+        var folderPaths = markerPaths
+            .Select(FolderGuardUnlockMarkerFile.ReadTargetFolderPath)
+            .Where(path => path is not null)
+            .Select(path => path!)
+            .ToList();
+
+        HandleFolderGuardUnlockLaunch(folderPaths, openFoldersAfterUnlock: true);
     }
 
     /// <summary>HandleLaunchArgs 裡兩個「需要開一個全新 MainWindow」的分支共用：一般加密路徑、

@@ -21,19 +21,17 @@ internal static class ShellExtensionRegistrar
     private const string ClsidString = "{A1B2C3D4-E5F6-4789-9ABC-DEF012345678}";
     private const string DllFileName = "FileLockerShellExtension.dll";
 
-    // 要跟 folderguard_namespace.cpp 裡的 CLSID_FolderGuardNamespaceFolder 保持完全一致——
-    // 「雙擊已上鎖資料夾直接解鎖」這個選配功能用的命名空間擴充，跟右鍵選單是完全獨立的 COM
-    // 類別/CLSID。值本身定義在 FolderGuardNamespaceMarker.NamespaceClsid（C# 端唯一定義處，
-    // 這裡直接引用，不再像之前一樣自己另外宣告一份字串）。
-    private static string NamespaceClsidString => FolderGuardNamespaceMarker.NamespaceClsid;
-
     // dllmain.cpp 的 IsFolderGuardLocked 執行期讀這個登錄值，不再自己硬編一份拒絕權限遮罩——
     // FolderGuardAcl.DeniedRightsMask 才是唯一定義處，見該常數上的說明。
     private const string FolderGuardDeniedRightsMaskValueName = "FolderGuardDeniedRightsMask";
 
-    // SFGAO_FOLDER | SFGAO_FILESYSTEM | SFGAO_FILESYSANCESTOR——要跟 folderguard_namespace.cpp
-    // 的 IShellFolder::GetAttributesOf 回傳值保持一致（不含 SFGAO_BROWSABLE／SFGAO_HASSUBFOLDER）。
-    private const int NamespaceFolderAttributes = 0x70000000;
+    // 「雙擊已上鎖資料夾直接解鎖」選配功能用的標記檔副檔名關聯——見 FolderGuardUnlockMarkerFile
+    // 上的說明：之前用 Shell Namespace Extension（CLSID2）接管資料夾本身的做法，實測連續踩到
+    // explorer.exe 死結、右鍵選單整個消失兩個問題，改成走跟 `.locked` 一樣的檔案關聯機制，
+    // 不需要任何 COM 命名空間物件，只需要一般的副檔名開啟動作登錄。
+    private const string LockFolderMarkerProgId = "FileLocker.LockFolderMarker";
+    private const string LockFolderMarkerUnlockArgFlag = "--folder-guard-unlock-marker";
+    private const string LockFolderMarkerIconFileName = "LockFolderMarker.ico";
 
     /// <summary>
     /// 檢查、需要的話就（重新）註冊 Shell Extension。設計成每次啟動都可以安全呼叫——
@@ -61,13 +59,16 @@ internal static class ShellExtensionRegistrar
         }
 
         var fileHash = ComputeFileHash(dllPath);
+        var appExePath = Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, "FileLocker.App.exe");
 
         // 只比對路徑不夠——DLL 有可能原地被重新編譯覆蓋（路徑沒變、內容變了），這種情況也要
         // 判定成「需要重新註冊」，才能正確觸發呼叫端「請重啟 Explorer」的提示（見 App.xaml.cs）。
+        var lockFolderMarkerIconPath = Path.Combine(AppContext.BaseDirectory, LockFolderMarkerIconFileName);
+
         var alreadyRegistered =
             IsClsidFullyRegistered(ClsidString, dllPath, fileHash, IsContextMenuHandlerFullyRegistered)
             && IsFolderGuardDeniedRightsMaskCurrent()
-            && IsClsidFullyRegistered(NamespaceClsidString, dllPath, fileHash, IsNamespaceShellFolderRegistered);
+            && IsLockFolderMarkerAssociationRegistered(appExePath, lockFolderMarkerIconPath);
 
         if (alreadyRegistered)
         {
@@ -77,7 +78,7 @@ internal static class ShellExtensionRegistrar
         RegisterClsidAndHandler(ClsidString, dllPath, fileHash, RegisterContextMenuHandler);
         WriteFolderGuardDeniedRightsMask();
 
-        RegisterClsidAndHandler(NamespaceClsidString, dllPath, fileHash, RegisterNamespaceShellFolder);
+        RegisterLockFolderMarkerAssociation(appExePath, lockFolderMarkerIconPath);
 
         return true;
     }
@@ -132,20 +133,43 @@ internal static class ShellExtensionRegistrar
     }
 
     /// <summary>
-    /// CLSID 底下的 ShellFolder 子機碼是 Explorer 判斷「這個 CLSID 是一個命名空間資料夾」的
-    /// 必要登記，跟右鍵選單那組 ContextMenuHandlers 完全獨立——desktop.ini 裡的 CLSID 值要
-    /// 能在這裡找到對應的 ShellFolder 登記，Explorer 才會真的把它當命名空間物件處理。
+    /// `.lockfolder` 副檔名關聯：純標準的「這個副檔名要用哪個程式打開」登記，不涉及任何 COM
+    /// 命名空間物件——`ProgId\shell\open\command` 指到 `FileLocker.App.exe`，帶
+    /// <see cref="LockFolderMarkerUnlockArgFlag"/> 旗標＋標記檔路徑（`%1`）當參數，
+    /// App.xaml.cs 收到後讀出標記檔內容拿到真正資料夾路徑，走既有的解鎖流程。圖示用專屬的
+    /// `LockFolderMarker.ico`（見專案檔內 Content 項目，會跟著建置/發佈輸出一起帶走）——找不到
+    /// 這個檔案（理論上不該發生，但避免因為找不到圖示就整段登錄失敗）就退回借用主程式圖示。
     /// </summary>
-    private static void RegisterNamespaceShellFolder()
+    private static void RegisterLockFolderMarkerAssociation(string appExePath, string iconPath)
     {
-        using var key = Registry.CurrentUser.CreateSubKey($@"Software\Classes\CLSID\{NamespaceClsidString}\ShellFolder");
-        key.SetValue("Attributes", NamespaceFolderAttributes, RegistryValueKind.DWord);
+        using var extKey = Registry.CurrentUser.CreateSubKey($@"Software\Classes\{FolderGuardUnlockMarkerFile.Extension}");
+        extKey.SetValue(null, LockFolderMarkerProgId);
+
+        using var commandKey = Registry.CurrentUser.CreateSubKey($@"Software\Classes\{LockFolderMarkerProgId}\shell\open\command");
+        commandKey.SetValue(null, $"\"{appExePath}\" {LockFolderMarkerUnlockArgFlag} \"%1\"");
+
+        using var iconKey = Registry.CurrentUser.CreateSubKey($@"Software\Classes\{LockFolderMarkerProgId}\DefaultIcon");
+        iconKey.SetValue(null, File.Exists(iconPath) ? $"\"{iconPath}\",0" : $"\"{appExePath}\",0");
     }
 
-    private static bool IsNamespaceShellFolderRegistered()
+    private static bool IsLockFolderMarkerAssociationRegistered(string appExePath, string iconPath)
     {
-        using var key = Registry.CurrentUser.OpenSubKey($@"Software\Classes\CLSID\{NamespaceClsidString}\ShellFolder");
-        return key?.GetValue("Attributes") is int attributes && attributes == NamespaceFolderAttributes;
+        using var extKey = Registry.CurrentUser.OpenSubKey($@"Software\Classes\{FolderGuardUnlockMarkerFile.Extension}");
+        if (!string.Equals(extKey?.GetValue(null) as string, LockFolderMarkerProgId, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        using var commandKey = Registry.CurrentUser.OpenSubKey($@"Software\Classes\{LockFolderMarkerProgId}\shell\open\command");
+        var expectedCommand = $"\"{appExePath}\" {LockFolderMarkerUnlockArgFlag} \"%1\"";
+        if (!string.Equals(commandKey?.GetValue(null) as string, expectedCommand, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        using var iconKey = Registry.CurrentUser.OpenSubKey($@"Software\Classes\{LockFolderMarkerProgId}\DefaultIcon");
+        var expectedIcon = File.Exists(iconPath) ? $"\"{iconPath}\",0" : $"\"{appExePath}\",0";
+        return string.Equals(iconKey?.GetValue(null) as string, expectedIcon, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

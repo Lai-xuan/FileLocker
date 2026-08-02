@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -24,9 +26,16 @@ public partial class FolderGuardUnlockPromptWindow : Window
     private readonly IReadOnlyList<string> _paths;
     private readonly FolderGuardService _folderGuardService;
     private readonly bool _passkeyEnabled;
+    private readonly bool _openFoldersAfterUnlock;
     private bool _isBusy;
 
-    public FolderGuardUnlockPromptWindow(IReadOnlyList<string> paths, FolderGuardService folderGuardService, string theme)
+    /// <summary>
+    /// <paramref name="openFoldersAfterUnlock"/>：雙擊 `.lockfolder` 標記檔進來的情境專用——
+    /// 使用者的原始意圖是「打開這個資料夾」，不是單純「解鎖」，解鎖成功後要接著幫忙用
+    /// 檔案總管開啟資料夾本身，才算真的完成使用者想做的事；右鍵選單「解鎖」不需要這個行為，
+    /// 使用者當下就已經在看著這個資料夾（甚至就在它的父層），不需要再另外幫忙開一次。
+    /// </summary>
+    public FolderGuardUnlockPromptWindow(IReadOnlyList<string> paths, FolderGuardService folderGuardService, string theme, bool openFoldersAfterUnlock = false)
     {
         InitializeComponent();
         ApplyTheme(theme);
@@ -34,6 +43,7 @@ public partial class FolderGuardUnlockPromptWindow : Window
         _paths = paths;
         _folderGuardService = folderGuardService;
         _passkeyEnabled = folderGuardService.IsPasskeyEnabled;
+        _openFoldersAfterUnlock = openFoldersAfterUnlock;
 
         MessageText.Text = paths.Count == 1
             ? $"你要將「{Path.GetFileName(paths[0].TrimEnd(Path.DirectorySeparatorChar))}」解鎖嗎？"
@@ -152,8 +162,30 @@ public partial class FolderGuardUnlockPromptWindow : Window
         };
         SuccessOverlay.BeginAnimation(OpacityProperty, fadeIn);
 
+        if (_openFoldersAfterUnlock)
+        {
+            OpenFoldersInExplorer();
+        }
+
         await Task.Delay(500);
         Close();
+    }
+
+    /// <summary>解鎖成功後開啟資料夾本身——跟 MainWindow 「開啟所在位置」用同一個
+    /// UseShellExecute 呼叫 explorer.exe 的模式。單一項目失敗（例如剛好又被搬走）不影響
+    /// 其他項目，也不影響解鎖流程本身已經成功這件事。</summary>
+    private void OpenFoldersInExplorer()
+    {
+        foreach (var path in _paths)
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo { FileName = "explorer.exe", Arguments = $"\"{path}\"", UseShellExecute = true });
+            }
+            catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
+            {
+            }
+        }
     }
 
     private void SetBusyState(bool isBusy)

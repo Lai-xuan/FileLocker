@@ -14,6 +14,15 @@
     <Resource Include="Assets\Fonts\IBMPlexSansTC-Bold.ttf" />
   </ItemGroup>
 
+  <!-- `.lockfolder` 標記檔的圖示：獨立 .ico 檔（不是借用主程式圖示），需要跟著建置輸出、
+       跟著 dotnet publish 一起打包，ShellExtensionRegistrar 註冊 DefaultIcon 時才找得到。 -->
+  <ItemGroup>
+    <Content Include="LockFolderMarker.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>

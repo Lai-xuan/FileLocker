@@ -8,7 +8,6 @@
 #include <vector>
 #include <string>
 #include "shell_extension_common.h"
-#include "folderguard_namespace.h"
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "advapi32.lib")
@@ -20,9 +19,8 @@
 static const CLSID CLSID_FileLockerShellExtension =
 { 0xA1B2C3D4, 0xE5F6, 0x4789, { 0x9A, 0xBC, 0xDE, 0xF0, 0x12, 0x34, 0x56, 0x78 } };
 
-// 兩個都不能用 static——folderguard_namespace.cpp 也需要讀寫這兩個全域變數（見
-// shell_extension_common.h 的 extern 宣告），static 會限制成只有這個編譯單元看得到，
-// 跨檔連結會找不到符號。
+// 不能用 static——shell_extension_common.h 的 inline 函式（例如 LaunchFileLockerApp）也需要
+// 讀寫這個全域變數，static 會限制成只有這個編譯單元看得到，跨檔連結會找不到符號。
 LONG g_cDllRef = 0;
 HMODULE g_hModule = nullptr;
 
@@ -73,9 +71,9 @@ static DWORD GetFolderGuardDeniedRightsMask()
 
 /// <summary>
 /// 查目前使用者的 SID 在這個資料夾上是不是有一條符合的 Deny ACE，邏輯對應
-/// FolderGuardAcl.cs 的 IsDenyRuleActive——用來決定右鍵選單第二項要顯示「上鎖」還是「解鎖」。
-/// 任何 API 失敗都當作「沒有鎖定」，跟 C# 那邊 catch 起來回傳 false 的保守做法一致：
-/// 選單顯示錯了頂多是使用者點了發現不對，不影響資料正確性（真正的解鎖動作還是會重新驗證身份）。
+/// FolderGuardAcl.cs 的 IsDenyRuleActive。任何 API 失敗都當作「沒有鎖定」，跟 C# 那邊 catch
+/// 起來回傳 false 的保守做法一致：選單顯示錯了頂多是使用者點了發現不對，不影響資料正確性
+/// （真正的解鎖動作還是會重新驗證身份）。
 /// </summary>
 static bool IsFolderGuardLocked(const std::wstring& path)
 {
@@ -536,11 +534,6 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv)
         HRESULT hr = pFactory->QueryInterface(riid, ppv);
         pFactory->Release();
         return hr;
-    }
-
-    if (IsEqualCLSID(rclsid, CLSID_FolderGuardNamespaceFolder))
-    {
-        return CreateFolderGuardNamespaceClassFactory(riid, ppv);
     }
 
     return CLASS_E_CLASSNOTAVAILABLE;

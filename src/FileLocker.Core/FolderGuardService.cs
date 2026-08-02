@@ -354,9 +354,10 @@ public class FolderGuardService
         return new FolderGuardUnlockResult(true);
     }
 
-    /// <summary>設定頁「雙擊已上鎖資料夾直接解鎖」開關切換：對目前清單裡所有 Locked 的項目
-    /// 批次補貼/撕掉命名空間標記，讓開關生效範圍涵蓋「已經鎖著的資料夾」，不是只影響之後新鎖的。
-    /// 個別資料夾標記失敗不中止整批（跟 LockFolderAsync／UnlockFolderCoreAsync 同一個容錯原則），
+    /// <summary>設定頁「雙擊已上鎖資料夾直接解鎖」開關切換：對目前清單裡所有 Locked 的項目補上/
+    /// 撕掉標記檔（<see cref="FolderGuardProtection.SwitchMode"/>），讓開關生效範圍涵蓋「已經鎖著
+    /// 的資料夾」，不是只影響之後新鎖的——ACL 本身不用跟著動，兩種模式共用同一套 ACL 保護。個別
+    /// 資料夾切換失敗不中止整批（跟 LockFolderAsync／UnlockFolderCoreAsync 同一個容錯原則），
     /// 開關本身還是要成功切換並存檔。</summary>
     public async Task SetDoubleClickUnlockEnabledAsync(bool enabled)
     {
@@ -373,17 +374,7 @@ public class FolderGuardService
         {
             try
             {
-                await Task.Run(() =>
-                {
-                    if (enabled)
-                    {
-                        FolderGuardNamespaceMarker.Apply(path);
-                    }
-                    else
-                    {
-                        FolderGuardNamespaceMarker.Remove(path);
-                    }
-                });
+                await Task.Run(() => FolderGuardProtection.SwitchMode(path, enabled));
             }
             catch (Exception ex) when (ex is UnauthorizedAccessException or IOException) { }
         }
