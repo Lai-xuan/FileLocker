@@ -2,11 +2,10 @@
 
 ## 繁體中文
 
-CLI 正式隨安裝程式一起發布並加入系統 PATH，並修正資料夾防護在背景執行時的兩個崩潰/誤判問題。
+修正資料夾防護在背景執行時的兩個崩潰/誤判問題。
 
 ### 亮點
 
-- **CLI 隨裝發布（全新）**：`FileLocker.Cli` 現在會一起打包進安裝內容（獨立的 `cli/` 子資料夾，不跟 GUI 混在同一層），並透過安裝程式加入系統 PATH，安裝完成後可以直接在任何終端機打 `FileLocker.Cli --encrypt`／`--list` 等指令，不需要自己找路徑。
 - **資料夾防護：修正背景執行時右鍵完全無反應**：FileLocker 已經在背景執行時，右鍵「上鎖」／「解鎖」原本完全沒有反應——負責轉送這次動作的行程會在轉送完畢後嘗試釋放一個自己從未持有的系統鎖而當掉，現在已修正，並補上讓確認小視窗確實跳到最前面的處理（背景行程原本無法自行搶回前景焦點）。
 - **資料夾防護：修正右鍵選單鎖定狀態誤判**：右鍵選單原本無法正確判斷資料夾是否已上鎖（位元遮罩算錯，永遠判定成「未鎖定」，導致解鎖選項不會出現），已修正，並改成單一來源、執行期讀取，避免之後又漂移出錯。
 
@@ -21,11 +20,10 @@ CLI 正式隨安裝程式一起發布並加入系統 PATH，並修正資料夾�
 
 ## English
 
-The CLI now ships with the installer and is added to the system PATH; two Folder Guard crash/misdetection issues during background operation are also fixed.
+Two Folder Guard crash/misdetection issues during background operation are fixed.
 
 ### Highlights
 
-- **CLI ships with the installer (new)**: `FileLocker.Cli` is now packaged into the installer content (its own `cli/` subfolder, kept separate from the GUI) and added to the system PATH by the installer — after installing, you can run `FileLocker.Cli --encrypt` / `--list` etc. from any terminal without hunting for the path yourself.
 - **Folder Guard: fixed right-click doing nothing while running in the background**: right-click Lock/Unlock did nothing while FileLocker was already running in the background. The process that forwards the click to the running instance used to crash right after forwarding (releasing a system lock it never owned), and the confirmation window couldn't reliably grab foreground focus from a background process either — both are now fixed.
 - **Folder Guard: fixed the context menu misreading lock state**: the context menu couldn't correctly tell whether a folder was already locked (a miscalculated bitmask always evaluated to "not locked," so "Unlock" never appeared) — fixed, and moved to a single source read at runtime so it can't drift out of sync again.
 
