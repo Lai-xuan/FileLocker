@@ -93,4 +93,38 @@ public class FolderGuardStoreTests : IDisposable
 
         Assert.Single(result);
     }
+
+    [Fact]
+    public void FolderGuardData_DefaultValues_AutoRelockEnabledTrueAndMinutes15()
+    {
+        var data = new FolderGuardData();
+
+        Assert.True(data.AutoRelockEnabled);
+        Assert.Equal(15, data.AutoRelockMinutes);
+    }
+
+    [Fact]
+    public void Load_OldFormatJsonWithoutAutoRelockFields_FallsBackToDefaults()
+    {
+        // 模擬升級前就存在的 guarded-folders.json：完全沒有 AutoRelockEnabled/AutoRelockMinutes
+        // 這兩個鍵，驗證舊使用者升級後不會因為缺欄位而讀出奇怪的值（例如 bool 預設 false、
+        // int 預設 0），而是拿到跟全新安裝一樣的預設值。
+        var filePath = Path.Combine(_tempDir.FullName, "guarded-folders.json");
+        File.WriteAllText(filePath, """
+            {
+              "PasswordSaltBase64": null,
+              "PasswordVerificationHashBase64": null,
+              "PasskeyEnabled": false,
+              "PasskeyCredentialName": null,
+              "DoubleClickUnlockEnabled": false,
+              "Entries": []
+            }
+            """);
+        var oldFormatStore = new FolderGuardStore(filePath);
+
+        var data = oldFormatStore.Load();
+
+        Assert.True(data.AutoRelockEnabled);
+        Assert.Equal(15, data.AutoRelockMinutes);
+    }
 }

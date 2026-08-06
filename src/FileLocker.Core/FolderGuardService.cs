@@ -35,6 +35,13 @@ public class FolderGuardService
 
     public bool IsPasskeyEnabled => _store.Load().PasskeyEnabled;
     public bool IsDoubleClickUnlockEnabled => _store.Load().DoubleClickUnlockEnabled;
+    public bool IsAutoRelockEnabled => _store.Load().AutoRelockEnabled;
+    public int AutoRelockMinutes => _store.Load().AutoRelockMinutes;
+
+    /// <summary>RelockExpiredEntriesAsync 真的重新上鎖了至少一個項目時觸發，只帶被重新上鎖的
+    /// 路徑清單——沒有項目過期就不觸發，呼叫端（App.xaml.cs／MainWindow）靠這個約定判斷
+    /// 要不要跳 toast 通知，不用自己另外檢查清單是否為空。</summary>
+    public event EventHandler<IReadOnlyList<string>>? EntriesAutoRelocked;
 
     /// <summary>給 LockService 的巢狀防護檢查用（見 LockService 建構子的 getGuardedFolderPaths 參數）：
     /// 只回傳目前真的在 Locked 狀態、且通過自我修復檢查的路徑。</summary>
@@ -378,6 +385,57 @@ public class FolderGuardService
             }
             catch (Exception ex) when (ex is UnauthorizedAccessException or IOException) { }
         }
+    }
+
+    /// <summary>設定頁「解鎖後閒置自動重新上鎖」開關切換：minutes 不做互動式驗證，直接 clamp 到
+    /// 最小 1（沒有腳本／使用者能透過這個入口傳入 0 或負數造成整批項目立刻被重新上鎖的意外行為）。</summary>
+    public async Task SetAutoRelockAsync(bool enabled, int minutes)
+    {
+        await Task.Run(() =>
+        {
+            var data = _store.Load();
+            data.AutoRelockEnabled = enabled;
+            data.AutoRelockMinutes = Math.Max(1, minutes);
+            _store.Save(data);
+        });
+    }
+
+    /// <summary>解鎖後閒置自動重新上鎖的核心判斷：App.xaml.cs 的 DispatcherTimer（週期性）跟啟動
+    /// 補跑都呼叫同一個方法，兩者都只是「現在該不該把某個 Unlocked 項目重新上鎖」的同一個判斷，
+    /// 呼叫端不用關心是計時器觸發還是啟動補跑。方法本身是冪等的——沒到期的項目每次呼叫都直接
+    /// 略過，重複呼叫不會有副作用。AutoRelockEnabled 關閉時整個方法是 no-op，回傳空清單、不觸發
+    /// EntriesAutoRelocked 事件。單筆重新上鎖失敗（跟 LockFolderAsync／LockFoldersAsync 同一個
+    /// 容錯原則）不中止整批，只是不會出現在回傳清單裡。</summary>
+    public async Task<IReadOnlyList<string>> RelockExpiredEntriesAsync()
+    {
+        var data = _store.Load();
+        if (!data.AutoRelockEnabled)
+        {
+            return Array.Empty<string>();
+        }
+
+        var cutoff = DateTime.UtcNow - TimeSpan.FromMinutes(data.AutoRelockMinutes);
+        var expiredPaths = data.Entries
+            .Where(e => e.Status == FolderGuardStatus.Unlocked && e.UnlockedAtUtc is not null && e.UnlockedAtUtc.Value <= cutoff)
+            .Select(e => e.Path)
+            .ToList();
+
+        var relocked = new List<string>(expiredPaths.Count);
+        foreach (var path in expiredPaths)
+        {
+            var result = await LockFolderAsync(path);
+            if (result.Success)
+            {
+                relocked.Add(path);
+            }
+        }
+
+        if (relocked.Count > 0)
+        {
+            EntriesAutoRelocked?.Invoke(this, relocked);
+        }
+
+        return relocked;
     }
 
     /// <summary>加密流程撞到巢狀防護資料夾、使用者確認解鎖後呼叫：解鎖但不留清單記錄

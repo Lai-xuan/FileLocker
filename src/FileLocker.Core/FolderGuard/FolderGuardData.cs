@@ -33,5 +33,15 @@ public class FolderGuardData
     /// 「存取被拒」畫面擋一次。ACL 保護強度不受這個開關影響，兩種狀態都一樣強。</summary>
     public bool DoubleClickUnlockEnabled { get; set; }
 
+    /// <summary>解鎖後閒置自動重新上鎖：預設開啟，這是防止「忘記重新上鎖」的安全性功能，跟
+    /// DoubleClickUnlockEnabled 這種純操作體驗開關不同，預設值刻意不同（見 FolderGuardService.
+    /// RelockExpiredEntriesAsync 的說明）。「閒置」是解鎖後經過的牆鐘時間（以 FolderGuardEntry.
+    /// UnlockedAtUtc 起算），不是真正的系統輸入閒置偵測。</summary>
+    public bool AutoRelockEnabled { get; set; } = true;
+
+    /// <summary>AutoRelockEnabled 開啟時的門檻分鐘數，預設 15 分鐘——落在「防止忘記重新上鎖」
+    /// 跟「不要在正常操作中途忽然鎖上」之間的合理折衷。</summary>
+    public int AutoRelockMinutes { get; set; } = 15;
+
     public List<FolderGuardEntry> Entries { get; set; } = new();
 }
