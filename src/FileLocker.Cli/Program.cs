@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using FileLocker.Cli;
 using FileLocker.Core;
 using FileLocker.Core.Models;
 using FileLocker.Core.Vault;
@@ -32,30 +33,48 @@ var service = new LockService(vault);
 // 對一個「用完就結束」的行程來說這才是對的取捨。
 var command = args[0];
 
-switch (command)
+try
 {
-    case "--encrypt":
-        RequireArgs(2);
-        await EncryptCommandAsync(args[1..]);
-        break;
-    case "--unlock":
-        RequireArgs(2);
-        await UnlockCommandAsync(args[1..]);
-        break;
-    case "--unlock-recovery":
-        RequireArgs(3);
-        await UnlockByRecoveryKeyCommandAsync(args[1], args[2], args.Length > 3 ? args[3] : null);
-        break;
-    case "--list":
-        ListCommand();
-        break;
-    case "--delete":
-        RequireArgs(2);
-        await DeleteCommandAsync(args[1..]);
-        break;
-    default:
-        PrintUsage();
-        break;
+    switch (command)
+    {
+        case "--encrypt":
+            RequireArgs(2);
+            {
+                var (options, paths) = CliArgumentParser.Parse(args[1..]);
+                await EncryptCommandAsync(paths.ToArray(), options);
+            }
+            break;
+        case "--unlock":
+            RequireArgs(2);
+            {
+                var (options, paths) = CliArgumentParser.Parse(args[1..]);
+                await UnlockCommandAsync(paths.ToArray(), options);
+            }
+            break;
+        case "--unlock-recovery":
+            RequireArgs(3);
+            await UnlockByRecoveryKeyCommandAsync(args[1], args[2], args.Length > 3 ? args[3] : null);
+            break;
+        case "--list":
+            ListCommand();
+            break;
+        case "--delete":
+            RequireArgs(2);
+            {
+                var (options, uuids) = CliArgumentParser.Parse(args[1..]);
+                await DeleteCommandAsync(uuids.ToArray(), options);
+            }
+            break;
+        default:
+            PrintUsage();
+            break;
+    }
+}
+catch (CliArgumentException ex)
+{
+    Console.WriteLine($"參數錯誤：{ex.Message}");
+    PrintUsage();
+    Environment.Exit(CliExitCode.UsageError);
 }
 
 void RequireArgs(int minCount)
@@ -67,7 +86,7 @@ void RequireArgs(int minCount)
     }
 }
 
-async Task EncryptCommandAsync(string[] targetPaths)
+async Task EncryptCommandAsync(string[] targetPaths, CliOptions options)
 {
     var missing = targetPaths.Where(p => !File.Exists(p) && !Directory.Exists(p)).ToList();
     if (missing.Count > 0)
@@ -76,32 +95,54 @@ async Task EncryptCommandAsync(string[] targetPaths)
         {
             Console.WriteLine($"錯誤：找不到 {path}");
         }
+        Environment.Exit(CliExitCode.PartialOrTotalFailure);
         return;
     }
 
-    Console.Write("請輸入密碼：");
-    var password = ReadPassword();
-    Console.Write("\n請再輸入一次密碼確認：");
-    var confirmPassword = ReadPassword();
-    Console.WriteLine();
+    // --password-stdin／--password-file 出現本身就是「非互動模式」的觸發條件（見規劃：不另外
+    // 設一個全域 --non-interactive 開關，避免兩者互相矛盾）。非互動模式下確認密碼／恢復金鑰
+    // y-N／密碼提示這三個互動問題全部跳過，直接用旗標值，不會像原本互動流程那樣依序讀好幾行
+    // stdin（腳本很難保證順序正確）。
+    var nonInteractive = options.PasswordFromStdin || options.PasswordFilePath is not null;
 
-    if (password != confirmPassword)
+    string password;
+    bool enableRecoveryKey;
+    string? hint;
+
+    if (nonInteractive)
     {
-        Console.WriteLine("兩次輸入的密碼不一致，取消加密。");
-        return;
+        password = ReadPasswordFromFlag(options);
+        enableRecoveryKey = options.RecoveryKeyEnabled;
+        hint = options.Hint;
+    }
+    else
+    {
+        Console.Write("請輸入密碼：");
+        password = ReadPassword();
+        Console.Write("\n請再輸入一次密碼確認：");
+        var confirmPassword = ReadPassword();
+        Console.WriteLine();
+
+        if (password != confirmPassword)
+        {
+            Console.WriteLine("兩次輸入的密碼不一致，取消加密。");
+            Environment.Exit(CliExitCode.PartialOrTotalFailure);
+            return;
+        }
+
+        Console.Write("要順便產生恢復金鑰嗎？(y/N)：");
+        enableRecoveryKey = (Console.ReadLine() ?? "").Trim().Equals("y", StringComparison.OrdinalIgnoreCase);
+
+        Console.Write("密碼提示（可留空，直接按 Enter）：");
+        hint = Console.ReadLine();
     }
 
     if (string.IsNullOrEmpty(password))
     {
         Console.WriteLine("密碼不能是空的，取消加密。");
+        Environment.Exit(CliExitCode.PartialOrTotalFailure);
         return;
     }
-
-    Console.Write("要順便產生恢復金鑰嗎？(y/N)：");
-    var enableRecoveryKey = (Console.ReadLine() ?? "").Trim().Equals("y", StringComparison.OrdinalIgnoreCase);
-
-    Console.Write("密碼提示（可留空，直接按 Enter）：");
-    var hint = Console.ReadLine();
 
     // 選了不只一個項目才需要分組——單一項目沒有「摺疊」的意義，維持 batchId = null，
     // 跟 GUI 端 VaultProtocolHandlers.EncryptBatchAsync 同一套邏輯。
@@ -140,9 +181,11 @@ async Task EncryptCommandAsync(string[] targetPaths)
     {
         Console.WriteLine($"完成：{successCount} 筆成功、{targetPaths.Length - successCount} 筆失敗。");
     }
+
+    Environment.Exit(CliExitCode.ForBatch(successCount, targetPaths.Length));
 }
 
-async Task UnlockCommandAsync(string[] markerPaths)
+async Task UnlockCommandAsync(string[] markerPaths, CliOptions options)
 {
     var missing = markerPaths.Where(p => !File.Exists(p)).ToList();
     if (missing.Count > 0)
@@ -151,12 +194,22 @@ async Task UnlockCommandAsync(string[] markerPaths)
         {
             Console.WriteLine($"錯誤：找不到指標檔 {path}");
         }
+        Environment.Exit(CliExitCode.PartialOrTotalFailure);
         return;
     }
 
-    Console.Write("請輸入密碼：");
-    var password = ReadPassword();
-    Console.WriteLine();
+    var nonInteractive = options.PasswordFromStdin || options.PasswordFilePath is not null;
+    string password;
+    if (nonInteractive)
+    {
+        password = ReadPasswordFromFlag(options);
+    }
+    else
+    {
+        Console.Write("請輸入密碼：");
+        password = ReadPassword();
+        Console.WriteLine();
+    }
 
     Console.WriteLine("解密中...");
     var successCount = 0;
@@ -180,6 +233,8 @@ async Task UnlockCommandAsync(string[] markerPaths)
     {
         Console.WriteLine($"完成：{successCount} 筆成功、{markerPaths.Length - successCount} 筆失敗。");
     }
+
+    Environment.Exit(CliExitCode.ForBatch(successCount, markerPaths.Length));
 }
 
 async Task UnlockByRecoveryKeyCommandAsync(string uuid, string recoveryKey, string? destinationDir)
@@ -188,6 +243,8 @@ async Task UnlockByRecoveryKeyCommandAsync(string uuid, string recoveryKey, stri
     var result = await service.DecryptByRecoveryKeyAsync(uuid, recoveryKey, destinationDir);
 
     PrintUnlockResult(result);
+
+    Environment.Exit(result.Success ? CliExitCode.Success : CliExitCode.PartialOrTotalFailure);
 }
 
 void PrintUnlockResult(UnlockResult result)
@@ -238,26 +295,30 @@ string FormatSize(long bytes)
     return $"{size.ToString("0.##", CultureInfo.InvariantCulture)} {units[unitIndex]}";
 }
 
-async Task DeleteCommandAsync(string[] uuids)
+async Task DeleteCommandAsync(string[] uuids, CliOptions options)
 {
-    if (uuids.Length > 1)
+    if (!options.SkipConfirmation)
     {
-        Console.WriteLine("確定要永久刪除以下項目嗎？此動作無法復原：");
-        foreach (var id in uuids)
+        if (uuids.Length > 1)
         {
-            Console.WriteLine($"  {id}");
+            Console.WriteLine("確定要永久刪除以下項目嗎？此動作無法復原：");
+            foreach (var id in uuids)
+            {
+                Console.WriteLine($"  {id}");
+            }
+            Console.Write("(y/N)：");
         }
-        Console.Write("(y/N)：");
-    }
-    else
-    {
-        Console.Write($"確定要永久刪除 {uuids[0]} 嗎？此動作無法復原 (y/N)：");
-    }
-    var confirm = (Console.ReadLine() ?? "").Trim();
-    if (!confirm.Equals("y", StringComparison.OrdinalIgnoreCase))
-    {
-        Console.WriteLine("已取消。");
-        return;
+        else
+        {
+            Console.Write($"確定要永久刪除 {uuids[0]} 嗎？此動作無法復原 (y/N)：");
+        }
+        var confirm = (Console.ReadLine() ?? "").Trim();
+        if (!confirm.Equals("y", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine("已取消。");
+            Environment.Exit(CliExitCode.Cancelled);
+            return;
+        }
     }
 
     var successCount = 0;
@@ -297,6 +358,8 @@ async Task DeleteCommandAsync(string[] uuids)
     {
         Console.WriteLine($"完成：{successCount} 筆成功、{uuids.Length - successCount} 筆失敗。");
     }
+
+    Environment.Exit(CliExitCode.ForBatch(successCount, uuids.Length));
 }
 
 // 主控台沒有內建的密碼遮罩輸入，自己用 Console.ReadKey 逐字元讀取，
@@ -335,6 +398,16 @@ string ReadPassword()
     return password.ToString();
 }
 
+// --password-stdin／--password-file 共用同一套「拿到一行文字當密碼、不互動」的管線——呼叫端
+// 只在 nonInteractive（其中一個旗標有值）時才呼叫這個方法，所以 PasswordFilePath 為 null
+// 代表一定是走 stdin 這條路。跟既有的 ReadPassword() 是刻意分開的兩個方法：ReadPassword()
+// 是「互動遮罩輸入，但輸入被重導向時順便還能動」，這裡是「明確、唯一讀一行，不做任何遮罩／
+// 二次確認」，語意不同，共用同一個方法容易讓兩種情境的行為互相污染。
+string ReadPasswordFromFlag(CliOptions options)
+    => options.PasswordFromStdin
+        ? Console.In.ReadLine() ?? ""
+        : File.ReadLines(options.PasswordFilePath!).FirstOrDefault() ?? "";
+
 void PrintUsage()
 {
     Console.WriteLine("用法：");
@@ -346,4 +419,13 @@ void PrintUsage()
     Console.WriteLine();
     Console.WriteLine("--encrypt／--unlock／--delete 都支援一次傳多個路徑或 uuid：密碼（或刪除確認）只問一次，套用到所有項目，個別項目的成功/失敗各自列出。");
     Console.WriteLine("環境變數 FILELOCKER_VAULT_PATH 可以覆寫預設 Vault 位置（未設定時跟主程式共用同一個預設路徑）。");
+    Console.WriteLine();
+    Console.WriteLine("靜默批次模式（供腳本使用，不會有任何互動提示）：");
+    Console.WriteLine("  --password-stdin          從標準輸入讀一行當密碼（--encrypt／--unlock 適用，出現即觸發非互動模式）");
+    Console.WriteLine("  --password-file <路徑>     從檔案第一行讀密碼（跟 --password-stdin 互斥，只能擇一）");
+    Console.WriteLine("  --recovery-key             非互動模式下順便產生恢復金鑰（--encrypt 適用，預設不產生）");
+    Console.WriteLine("  --hint <文字>              非互動模式下設定密碼提示（--encrypt 適用，預設留空）");
+    Console.WriteLine("  --yes                      跳過 --delete 的確認提示，直接刪除");
+    Console.WriteLine();
+    Console.WriteLine("結束碼：0 = 全部成功，1 = 參數錯誤，2 = 批次中至少一筆失敗，3 = 使用者/腳本取消（例如 --delete 沒帶 --yes 又回答非 y）。");
 }
