@@ -55,6 +55,13 @@ public partial class MainWindow
     [DllImport("user32.dll")]
     private static extern bool GetWindowRect(IntPtr hwnd, out RectStruct rect);
 
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowPos(IntPtr hwnd, IntPtr hwndInsertAfter, int x, int y, int cx, int cy, uint flags);
+
+    private const uint SwpNoSize = 0x0001;
+    private const uint SwpNoZOrder = 0x0004;
+    private const uint SwpNoActivate = 0x0010;
+
     private const uint MonitorDefaultToNearest = 2;
     private const int WmGetMinMaxInfo = 0x0024;
     private const int WmNcCalcSize = 0x0083;
@@ -133,9 +140,41 @@ public partial class MainWindow
         var hwnd = new WindowInteropHelper(this).Handle;
 
         TryRestoreRoundedCorners(hwnd);
+        CenterOnScreen(hwnd);
 
         var source = HwndSource.FromHwnd(hwnd);
         source?.AddHook(WndProc);
+    }
+
+    /// <summary>手動置中，不依賴 WPF 內建的 WindowStartupLocation="CenterScreen"——這個視窗自己
+    /// 攔截了 WM_NCCALCSIZE／WM_GETMINMAXINFO（見檔案開頭第 3 點說明），WPF 內建的置中計算
+    /// 是照它自己認知的非客戶區尺寸去算，跟這裡動過手腳的非客戶區兜不起來，實測算出來的位置
+    /// 會偏掉（系統匣開窗時特別明顯，跑到螢幕角落）。改成量測實際的視窗外框尺寸
+    /// （GetWindowRect）＋所在螢幕的工作區（GetMonitorInfo，會扣掉工作列，不會讓視窗中心被
+    /// 工作列擋住）自己算，全程物理像素，不經過 WPF 的 DIP 轉換／WindowStartupLocation
+    /// 那套可能跟自訂非客戶區兜不起來的邏輯。</summary>
+    private static void CenterOnScreen(IntPtr hwnd)
+    {
+        if (!GetWindowRect(hwnd, out var windowRect))
+        {
+            return;
+        }
+
+        var monitor = MonitorFromWindow(hwnd, MonitorDefaultToNearest);
+        var monitorInfo = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+        if (!GetMonitorInfo(monitor, ref monitorInfo))
+        {
+            return;
+        }
+
+        var workArea = monitorInfo.WorkArea;
+        var windowWidth = windowRect.Right - windowRect.Left;
+        var windowHeight = windowRect.Bottom - windowRect.Top;
+
+        var x = workArea.Left + (workArea.Right - workArea.Left - windowWidth) / 2;
+        var y = workArea.Top + (workArea.Bottom - workArea.Top - windowHeight) / 2;
+
+        SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
     }
 
     private static void TryRestoreRoundedCorners(IntPtr hwnd)

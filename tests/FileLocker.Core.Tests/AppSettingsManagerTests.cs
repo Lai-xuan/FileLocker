@@ -29,6 +29,21 @@ public class AppSettingsManagerTests : IDisposable
         Assert.Null(settings.VaultPath);
         Assert.Equal("zh-TW", settings.Language);
         Assert.Equal("light", settings.Theme);
+        Assert.True(settings.MinimizeToTrayEnabled);
+        Assert.True(settings.LaunchAtStartupEnabled);
+    }
+
+    [Fact]
+    public void Save_ThenLoad_RoundTripsMinimizeToTrayAndLaunchAtStartupIndependently()
+    {
+        var manager = new AppSettingsManager(_filePath);
+        var original = new AppSettings { MinimizeToTrayEnabled = false, LaunchAtStartupEnabled = true };
+
+        manager.Save(original);
+        var loaded = manager.Load();
+
+        Assert.False(loaded.MinimizeToTrayEnabled);
+        Assert.True(loaded.LaunchAtStartupEnabled);
     }
 
     [Fact]

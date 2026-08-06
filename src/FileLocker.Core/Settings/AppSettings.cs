@@ -18,4 +18,14 @@ public class AppSettings
     /// <summary>null 代表使用者還沒設定過「關鍵操作」的 Windows Hello 驗證，見
     /// VaultProtocolHandlers.SetupCriticalActionAsync／VerifyCriticalActionAsync。</summary>
     public string? CriticalActionCredentialName { get; set; }
+
+    /// <summary>開啟後關閉所有視窗不會結束程式，改成留在系統匣（見 TrayIconManager），資料夾防護
+    /// 的閒置自動重新上鎖計時器才能持續運作。跟 LaunchAtStartupEnabled 是兩個獨立的開關——
+    /// 使用者可能只想要其中一個效果，不強制綁在一起。預設開啟。</summary>
+    public bool MinimizeToTrayEnabled { get; set; } = true;
+
+    /// <summary>開啟後登記 FileLocker 跟隨 Windows 啟動（見 StartupRegistrar，HKEY_CURRENT_USER
+    /// 底下，不需要系統管理員權限），開機後不用手動開一次 FileLocker 就有保護。跟
+    /// MinimizeToTrayEnabled 是兩個獨立的開關。預設開啟。</summary>
+    public bool LaunchAtStartupEnabled { get; set; } = true;
 }

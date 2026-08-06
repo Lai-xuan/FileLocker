@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Windows;
+using System.Windows.Threading;
 using FileLocker.Core;
 using FileLocker.Core.FolderGuard;
 using FileLocker.Core.History;
@@ -39,6 +40,8 @@ public partial class App : Application
     private VaultIndexCache? _vaultIndexCache;
     private VaultChangeWatcher? _vaultChangeWatcher;
     private FolderGuardService? _folderGuardService;
+    private DispatcherTimer? _folderGuardAutoRelockTimer;
+    private TrayIconManager? _trayIconManager;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -118,6 +121,15 @@ public partial class App : Application
         _vaultChangeWatcher.Start();
 
         StartPipeServerListener();
+        StartFolderGuardAutoRelockTimer();
+
+        // 系統匣常駐、跟隨 Windows 啟動：兩個獨立設定，各自只在開啟時才生效，關閉的人完全
+        // 不會看到系統匣圖示／不會被登記到 Run 機碼，行為跟這兩個功能出現之前一模一樣。
+        StartupRegistrar.EnsureConsistent(settings.LaunchAtStartupEnabled, GetAppExePath());
+        if (settings.MinimizeToTrayEnabled)
+        {
+            CreateTrayIcon();
+        }
 
         // 檢查／需要的話自動註冊 Shell Extension（見 ShellExtensionRegistrar 說明）。
         // 全新安裝、或應用程式資料夾被搬移過之後，這裡會真的執行註冊動作並回傳 true，
@@ -138,8 +150,39 @@ public partial class App : Application
         }
     }
 
+    /// <summary>解鎖後閒置自動重新上鎖：啟動時補跑一次（涵蓋「上次關閉前忘記重新上鎖、這次
+    /// 重開機才發現已經過期」的情境），之後每 60 秒輪詢一次——門檻是分鐘級精度（預設 15 分鐘），
+    /// 60 秒輪詢造成的最大延遲在這個時間尺度下可忽略，不需要更頻繁。兩條路徑呼叫的是
+    /// FolderGuardService 裡同一個冪等方法，這裡只負責排程，不重複判斷邏輯。只在第一個實體、
+    /// _folderGuardService 已經建構完成後才會呼叫到，不牽涉 Mutex 相關的啟動路徑（CLAUDE.md
+    /// 已知的坑那則提醒的是背景轉送行程，跟這裡的計時器排程無關）。</summary>
+    private void StartFolderGuardAutoRelockTimer()
+    {
+        _ = RunFolderGuardAutoRelockCheckAsync();
+
+        _folderGuardAutoRelockTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(60) };
+        _folderGuardAutoRelockTimer.Tick += async (_, _) => await RunFolderGuardAutoRelockCheckAsync();
+        _folderGuardAutoRelockTimer.Start();
+    }
+
+    /// <summary>包一層 try/catch——DispatcherTimer.Tick 的 async void 事件處理常式如果丟出未處理
+    /// 例外會直接讓整個行程當掉，這個計時器會一直跑到 App 結束，不能讓單次失敗（例如某個資料夾
+    /// 剛好在檢查瞬間被外部刪除）拖垮後續所有 tick。</summary>
+    private async Task RunFolderGuardAutoRelockCheckAsync()
+    {
+        try
+        {
+            await _folderGuardService!.RelockExpiredEntriesAsync();
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+        {
+        }
+    }
+
     protected override void OnExit(ExitEventArgs e)
     {
+        _folderGuardAutoRelockTimer?.Stop();
+        _trayIconManager?.Dispose();
         _vaultChangeWatcher?.Dispose();
         _vaultIndexCache?.Dispose();
 
@@ -170,6 +213,10 @@ public partial class App : Application
     // 才能沿用既有的 HandleFolderGuardUnlockLaunch（見 FolderGuardUnlockMarkerFile 上的說明）。
     private const string FolderGuardUnlockMarkerArgFlag = "--folder-guard-unlock-marker";
 
+    // 跟隨 Windows 啟動時，StartupRegistrar 登記的 Run 值帶這個旗標啟動——不開任何視窗，
+    // 只留系統匣圖示（背景服務在呼叫到這裡之前，OnStartup 已經全部啟動完成）。
+    private const string StartupArgFlag = "--startup";
+
     /// <summary>
     /// 「旗標 → 該開哪個資料夾防護進入點」的對應表：之後新增 Folder Guard 命令列旗標，
     /// 只需要在這裡加一列，不需要去改 HandleLaunchArgs 本身的控制流程。
@@ -192,13 +239,27 @@ public partial class App : Application
 
     private void HandleLaunchArgs(string[] args)
     {
+        if (args.Length == 1 && args[0] == StartupArgFlag)
+        {
+            if (_trayIconManager is null)
+            {
+                // 背景模式已經被使用者關閉，但這次登入還是被舊的 Run 登錄值觸發（下次登入就
+                // 不會了，OnStartup 已經呼叫過 StartupRegistrar.EnsureConsistent 把它刪掉）——
+                // 沒有視窗也沒有系統匣圖示可以留著，直接結束，不要變成看不見、殺不掉的殭屍行程。
+                Shutdown();
+            }
+            return;
+        }
+
         // 雙擊 .locked 檔案：允許同時存在多個 PasswordPromptWindow（使用者可能想同時解鎖
         // 好幾個不同的項目），每次都開一個新的，不嘗試去找「有沒有已經開著的」。
         if (args.Length == 1 && LooksLikeLockedFileArgument(args[0]))
         {
             var promptWindow = new PasswordPromptWindow(args[0], _vaultManager!, _lockService!, _settings!.Theme);
             promptWindow.Closed += (_, _) => ShutdownIfNoWindowsRemain();
-            promptWindow.Show();
+            // 這裡也可能是已經在系統匣裡的實體透過 Named Pipe 收到轉送過來的（見 WindowActivation
+            // 上的說明），不能只靠 Show()。
+            WindowActivation.ForceToForeground(promptWindow);
             return;
         }
 
@@ -251,10 +312,9 @@ public partial class App : Application
                 }
             });
         confirmWindow.Closed += (_, _) => ShutdownIfNoWindowsRemain();
-        confirmWindow.Show();
         // 這次動作很可能是背景執行個體透過 Named Pipe 收到轉送過來的（見 StartPipeServerListener），
-        // 單純 Show() 不保證能把視窗搶到前景——比照 MainWindow.ApplyIncomingPaths 補上 Activate()。
-        confirmWindow.Activate();
+        // 單純 Show()＋Activate() 不保證能把視窗搶到前景，見 WindowActivation 上的說明。
+        WindowActivation.ForceToForeground(confirmWindow);
     }
 
     private void HandleFolderGuardUnlockLaunch(List<string> paths, bool openFoldersAfterUnlock = false)
@@ -266,8 +326,7 @@ public partial class App : Application
 
         var unlockWindow = new FolderGuardUnlockPromptWindow(paths, _folderGuardService!, _settings!.Theme, openFoldersAfterUnlock);
         unlockWindow.Closed += (_, _) => ShutdownIfNoWindowsRemain();
-        unlockWindow.Show();
-        unlockWindow.Activate();
+        WindowActivation.ForceToForeground(unlockWindow);
     }
 
     /// <summary>雙擊 `.lockfolder` 標記檔的入口：帶進來的每個路徑都是標記檔本身，不是真正的
@@ -296,15 +355,106 @@ public partial class App : Application
             initialPaths, initialAction);
         mainWindow.Closed += (_, _) => ShutdownIfNoWindowsRemain();
         MainWindow = mainWindow;
-        mainWindow.Show();
+        // 這個方法本來只有雙擊/右鍵選單觸發的路徑會走到，都是直接從使用者輸入事件延伸出來，
+        // 前景權限通常還在；但系統匣選單（TrayMenuWindow）點擊之後，視窗建立的當下前一個
+        // 有前景權限的視窗（TrayMenuWindow 自己）已經先 Close() 掉了；另外背景實體透過 Named
+        // Pipe 收到轉送參數（雙擊已經在系統匣裡的實體的 exe）時，建構這個新視窗（含 WebView2
+        // 初始化）通常已經花掉太多時間，轉送行程給的搶焦權限早就過期——兩種情況單純 Show()＋
+        // Activate() 都不保證新視窗會被搶到最前面，見 WindowActivation 上的說明。
+        WindowActivation.ForceToForeground(mainWindow);
+    }
+
+    // ShellExtensionRegistrar 內部也算了一份一模一樣的值——兩邊是各自獨立的登錄檔登記職責，
+    // 不特地共用一個欄位，這裡額外包成方法只是因為現在有兩個呼叫點（啟動時、設定切換時）。
+    private static string GetAppExePath()
+        => Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, "FileLocker.App.exe");
+
+    private void CreateTrayIcon()
+    {
+        _trayIconManager = new TrayIconManager(
+            GetAppExePath(),
+            _settings!.Theme,
+            openMainWindow: () => ShowMainWindow(null),
+            openEncrypt: () => ShowMainWindow("encrypt"),
+            openList: () => ShowMainWindow("list"),
+            openFolderGuard: () => ShowMainWindow("folderGuard"),
+            exitApplication: ExitApplicationFromTray);
+    }
+
+    /// <summary>設定頁「關閉視窗後留在系統匣」開關即時生效用——之前這個設定只在 OnStartup 讀取
+    /// 一次，切換設定只會存檔、不會真的建立/移除系統匣圖示，導致關掉這個選項後背景執行照樣
+    /// 繼續、開啟後也要重開 App 才有系統匣圖示，兩種情況都跟畫面上顯示的狀態對不起來。</summary>
+    internal void ApplyMinimizeToTraySetting(bool enabled)
+    {
+        if (enabled)
+        {
+            if (_trayIconManager is null)
+            {
+                CreateTrayIcon();
+            }
+            return;
+        }
+
+        if (_trayIconManager is null)
+        {
+            return;
+        }
+
+        _trayIconManager.Dispose();
+        _trayIconManager = null;
+
+        // 使用者可能是從系統匣選單開設定頁改的——這種情況現在已經沒有任何視窗開著，關掉這個
+        // 設定之後系統匣圖示也拿掉了，不能留在一個「看不見、殺不掉」的殭屍狀態，要立刻真正結束。
+        ShutdownIfNoWindowsRemain();
+    }
+
+    /// <summary>設定頁「跟著 Windows 啟動」開關即時生效用——之前一樣只在 OnStartup 呼叫過一次
+    /// StartupRegistrar，切換設定只會存檔、不會真的更新 Run 機碼，關掉這個選項要等下一次啟動
+    /// 才會真的反登記，這段期間畫面上顯示「已關閉」但登錄檔其實還在，不一致。</summary>
+    internal void ApplyLaunchAtStartupSetting(bool enabled)
+        => StartupRegistrar.EnsureConsistent(enabled, GetAppExePath());
+
+    /// <summary>系統匣選單「開啟 FileLocker」／雙擊圖示，以及「加密」「已加密清單」「資料夾防護」
+    /// 三個分頁捷徑共用：已經有主視窗開著就把它搶到前景＋切分頁，沒有就開一個新的直接帶指定分頁。
+    /// NotifyIcon 的事件是在建立它的執行緒（這裡是 WPF UI 執行緒）的訊息迴圈上觸發的，不需要
+    /// 額外的 System.Windows.Forms.Application.Run()，也不需要 Dispatcher.Invoke 切執行緒。</summary>
+    private void ShowMainWindow(string? initialAction)
+    {
+        var existingMainWindow = Windows.OfType<MainWindow>().FirstOrDefault();
+        if (existingMainWindow is not null)
+        {
+            existingMainWindow.ApplyIncomingPaths(new List<string>(), initialAction);
+        }
+        else
+        {
+            OpenMainWindow(null, initialAction);
+        }
+    }
+
+    /// <summary>系統匣選單「結束 FileLocker」——唯一真正結束程式的路徑，不透過
+    /// ShutdownIfNoWindowsRemain（背景模式開啟時那個方法故意不結束程式）。</summary>
+    private void ExitApplicationFromTray()
+    {
+        _trayIconManager?.Dispose();
+        _trayIconManager = null;
+        Shutdown();
     }
 
     private void ShutdownIfNoWindowsRemain()
     {
-        if (Windows.Count == 0)
+        if (Windows.Count > 0)
         {
-            Shutdown();
+            return;
         }
+
+        // 背景模式開啟（系統匣圖示還在）：所有視窗都關了不代表使用者想結束程式，留著讓資料夾
+        // 防護的閒置自動重新上鎖計時器繼續跑，只有系統匣選單的「結束 FileLocker」才會真的結束。
+        if (_trayIconManager is not null)
+        {
+            return;
+        }
+
+        Shutdown();
     }
 
     private static bool LooksLikeLockedFileArgument(string arg)

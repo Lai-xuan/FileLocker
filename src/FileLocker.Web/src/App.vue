@@ -219,6 +219,8 @@ function closeWindow() {
 const settingsVaultPath = ref('')
 const settingsLanguage = ref('zh-TW')
 const settingsTheme = ref('light')
+const settingsMinimizeToTrayEnabled = ref(true)
+const settingsLaunchAtStartupEnabled = ref(true)
 // 「關鍵操作」的 Windows Hello 驗證是否已經設定過——目前唯一用途是「清除所有使用紀錄」，
 // 見 requestClearHistory。
 const settingsCriticalActionConfigured = ref(false)
@@ -241,6 +243,9 @@ const folderGuardConfigured = ref(false)
 const folderGuardPasskeyEnabled = ref(false)
 const folderGuardDoubleClickUnlockEnabled = ref(false)
 const isTogglingFolderGuardDoubleClickUnlock = ref(false)
+const folderGuardAutoRelockEnabled = ref(false)
+const folderGuardAutoRelockMinutes = ref(15)
+const isTogglingFolderGuardAutoRelock = ref(false)
 const folderGuardItems = ref([])
 const isLoadingFolderGuard = ref(false)
 const folderGuardSetupPassword = ref('')
@@ -843,6 +848,8 @@ const messageHandlers = {
     currentLocale.value = data.language
     settingsTheme.value = data.theme
     settingsCriticalActionConfigured.value = data.criticalActionConfigured
+    settingsMinimizeToTrayEnabled.value = data.minimizeToTrayEnabled
+    settingsLaunchAtStartupEnabled.value = data.launchAtStartupEnabled
   },
 
   setupCriticalActionResult(data) {
@@ -902,11 +909,16 @@ const messageHandlers = {
 
   initialPaths(data) {
     // action 由後端決定要切去哪個分頁：'folderGuardSetup' 是右鍵「上鎖」但整個資料夾防護功能
-    // 還沒設定過共用密碼時的引導路徑（見 App.xaml.cs HandleFolderGuardLockLaunch）；其餘
-    // （包含沒有 action 欄位的既有情境）維持原本行為，切到加密頁籤。
+    // 還沒設定過共用密碼時的引導路徑（見 App.xaml.cs HandleFolderGuardLockLaunch）；'list'／
+    // 'folderGuard' 是系統匣選單的分頁捷徑（見 App.xaml.cs ShowMainWindow），純粹切分頁、
+    // 不帶路徑；其餘（包含沒有 action 欄位的既有情境）維持原本行為，切到加密頁籤。
     if (data.action === 'folderGuardSetup') {
       activeTab.value = 'folderGuard'
       folderGuardPendingLockPaths.value = data.paths ? [...data.paths] : []
+      return
+    }
+    if (data.action === 'list' || data.action === 'folderGuard') {
+      activeTab.value = data.action
       return
     }
     activeTab.value = 'encrypt'
@@ -933,6 +945,20 @@ const messageHandlers = {
 
   setFolderGuardDoubleClickUnlockResult(data) {
     resolvePending('setFolderGuardDoubleClickUnlockResult', data)
+  },
+
+  setFolderGuardAutoRelockResult(data) {
+    resolvePending('setFolderGuardAutoRelockResult', data)
+  },
+
+  // 解鎖後閒置自動重新上鎖觸發時的背景推播（不是使用者在這個視窗主動觸發的操作，沒有對應的
+  // pending request 可以 resolve，走跟 vaultChanged 一樣的「背景通知」模式）：跳 toast，
+  // 使用者目前在資料夾防護分頁的話順便刷新清單，狀態才會立刻變回「已鎖定」，不用手動切分頁。
+  folderGuardAutoRelocked(data) {
+    showToast(t('folderGuard.autoRelockedToast', { count: data.paths.length }), 'info')
+    if (activeTab.value === 'folderGuard') {
+      refreshFolderGuardList()
+    }
   },
 
   checkForUpdatesResult(data) {
@@ -1070,6 +1096,8 @@ async function refreshFolderGuardList() {
   folderGuardConfigured.value = data.configured
   folderGuardPasskeyEnabled.value = data.passkeyEnabled
   folderGuardDoubleClickUnlockEnabled.value = data.doubleClickUnlockEnabled
+  folderGuardAutoRelockEnabled.value = data.autoRelockEnabled
+  folderGuardAutoRelockMinutes.value = data.autoRelockMinutes
   folderGuardItems.value = data.items
 }
 
@@ -1086,6 +1114,46 @@ async function toggleFolderGuardDoubleClickUnlockAction(event) {
   } else {
     event.target.checked = folderGuardDoubleClickUnlockEnabled.value
     showToast(t('folderGuard.doubleClickUnlockToggleFailed'))
+  }
+}
+
+// 「解鎖後閒置自動重新上鎖」開關跟分鐘數共用同一個後端方法（見 FolderGuardService.
+// SetAutoRelockAsync），切換開關時分鐘數維持目前值一起送出；同樣不需要身份驗證，
+// 失敗時把畫面狀態退回切換前，只顯示 toast。
+async function toggleFolderGuardAutoRelockAction(event) {
+  const enabled = event.target.checked
+  isTogglingFolderGuardAutoRelock.value = true
+  const result = await requestMessage('setFolderGuardAutoRelock', 'setFolderGuardAutoRelockResult', {
+    enabled,
+    minutes: folderGuardAutoRelockMinutes.value
+  })
+  isTogglingFolderGuardAutoRelock.value = false
+  if (result.success) {
+    folderGuardAutoRelockEnabled.value = result.enabled
+    folderGuardAutoRelockMinutes.value = result.minutes
+  } else {
+    event.target.checked = folderGuardAutoRelockEnabled.value
+    showToast(t('folderGuard.autoRelockToggleFailed'))
+  }
+}
+
+async function updateFolderGuardAutoRelockMinutesAction(event) {
+  const minutes = Number(event.target.value)
+  if (!Number.isFinite(minutes) || minutes < 1) {
+    event.target.value = folderGuardAutoRelockMinutes.value
+    return
+  }
+  isTogglingFolderGuardAutoRelock.value = true
+  const result = await requestMessage('setFolderGuardAutoRelock', 'setFolderGuardAutoRelockResult', {
+    enabled: folderGuardAutoRelockEnabled.value,
+    minutes
+  })
+  isTogglingFolderGuardAutoRelock.value = false
+  if (result.success) {
+    folderGuardAutoRelockMinutes.value = result.minutes
+  } else {
+    event.target.value = folderGuardAutoRelockMinutes.value
+    showToast(t('folderGuard.autoRelockToggleFailed'))
   }
 }
 
@@ -1390,6 +1458,22 @@ function setLanguage(value) {
 function setTheme(value) {
   settingsTheme.value = value
   sendMessage('updateSetting', { key: 'theme', value })
+}
+
+// 系統匣常駐、跟隨 Windows 啟動：兩個獨立開關，各自對應後端一個即時生效的副作用（見
+// MainWindow.HandleUpdateSettingRequest），跟 Theme/Language 一樣走通用的 updateSetting IPC，
+// 不需要像資料夾防護那組開關另外走 request/response 校驗——這是本機 settings.json 寫入，
+// 失敗機率極低，維持跟其他 App 層設定一致的簡單模式即可。
+function toggleMinimizeToTrayAction(event) {
+  const value = event.target.checked ? 'true' : 'false'
+  settingsMinimizeToTrayEnabled.value = event.target.checked
+  sendMessage('updateSetting', { key: 'minimizeToTrayEnabled', value })
+}
+
+function toggleLaunchAtStartupAction(event) {
+  const value = event.target.checked ? 'true' : 'false'
+  settingsLaunchAtStartupEnabled.value = event.target.checked
+  sendMessage('updateSetting', { key: 'launchAtStartupEnabled', value })
 }
 
 // 設定（或重新設定）「關鍵操作」用的 Windows Hello 驗證——目前用於清除所有使用紀錄前的
@@ -2453,6 +2537,53 @@ function historyDetailText(entry) {
           </section>
 
           <section class="settings-section">
+            <h3 class="settings-section__title">{{ t('settings.minimizeToTrayTitle') }}</h3>
+            <div class="field">
+              <label class="checkbox-field">
+                <input
+                  type="checkbox"
+                  :checked="settingsMinimizeToTrayEnabled"
+                  @change="toggleMinimizeToTrayAction"
+                />
+                <span>{{ t('settings.minimizeToTrayLabel') }}</span>
+                <span class="info-tooltip" tabindex="0">
+                  <span class="info-tooltip__icon">i</span>
+                  <span class="info-tooltip__bubble info-tooltip__bubble--wide">
+                    <p class="info-tooltip__intro">{{ t('settings.minimizeToTrayDetailIntro') }}</p>
+                    <ul class="info-tooltip__list">
+                      <li>{{ t('settings.minimizeToTrayDetailPoint1') }}</li>
+                      <li>{{ t('settings.minimizeToTrayDetailPoint2') }}</li>
+                    </ul>
+                  </span>
+                </span>
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <h3 class="settings-section__title">{{ t('settings.launchAtStartupTitle') }}</h3>
+            <div class="field">
+              <label class="checkbox-field">
+                <input
+                  type="checkbox"
+                  :checked="settingsLaunchAtStartupEnabled"
+                  @change="toggleLaunchAtStartupAction"
+                />
+                <span>{{ t('settings.launchAtStartupLabel') }}</span>
+                <span class="info-tooltip" tabindex="0">
+                  <span class="info-tooltip__icon">i</span>
+                  <span class="info-tooltip__bubble info-tooltip__bubble--wide">
+                    <p class="info-tooltip__intro">{{ t('settings.launchAtStartupDetailIntro') }}</p>
+                    <ul class="info-tooltip__list">
+                      <li>{{ t('settings.launchAtStartupDetailPoint1') }}</li>
+                    </ul>
+                  </span>
+                </span>
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-section">
             <h3 class="settings-section__title">{{ t('settings.criticalActionTitle') }}</h3>
             <p class="hint-text">{{ t('settings.criticalActionDescription') }}</p>
             <p class="status-message" :class="settingsCriticalActionConfigured ? 'status-message--success' : ''">
@@ -2505,6 +2636,43 @@ function historyDetailText(entry) {
                     </span>
                   </span>
                 </label>
+              </div>
+
+              <div class="field" style="margin-top: 16px;">
+                <label class="checkbox-field">
+                  <input
+                    type="checkbox"
+                    :checked="folderGuardAutoRelockEnabled"
+                    :disabled="isTogglingFolderGuardAutoRelock"
+                    @change="toggleFolderGuardAutoRelockAction"
+                  />
+                  <span>{{ t('folderGuard.autoRelockLabel') }}</span>
+                  <span class="info-tooltip" tabindex="0">
+                    <span class="info-tooltip__icon">i</span>
+                    <span class="info-tooltip__bubble info-tooltip__bubble--wide">
+                      <p class="info-tooltip__intro">{{ t('folderGuard.autoRelockDetailIntro') }}</p>
+                      <ul class="info-tooltip__list">
+                        <li>{{ t('folderGuard.autoRelockDetailPoint1') }}</li>
+                        <li>{{ t('folderGuard.autoRelockDetailPoint2') }}</li>
+                        <li>{{ t('folderGuard.autoRelockDetailPoint3') }}</li>
+                      </ul>
+                    </span>
+                  </span>
+                </label>
+                <div v-if="folderGuardAutoRelockEnabled" class="field" style="margin-top: 8px; margin-left: 28px;">
+                  <label>
+                    {{ t('folderGuard.autoRelockMinutesLabel') }}
+                    <input
+                      type="number"
+                      min="1"
+                      class="text-input"
+                      style="width: 80px; display: inline-block; margin-left: 8px;"
+                      :value="folderGuardAutoRelockMinutes"
+                      :disabled="isTogglingFolderGuardAutoRelock"
+                      @change="updateFolderGuardAutoRelockMinutesAction"
+                    />
+                  </label>
+                </div>
               </div>
             </template>
             <template v-else>

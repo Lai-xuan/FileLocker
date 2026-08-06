@@ -74,6 +74,12 @@ public partial class MainWindow : Window
         _vaultChangeWatcher.Changed += (_, _) =>
             Dispatcher.BeginInvoke(() => SendToFrontend(new { type = "vaultChanged" }));
 
+        // 解鎖後閒置自動重新上鎖觸發時（App.xaml.cs 的 DispatcherTimer 或啟動補跑），推播一則
+        // 通知給前端跳 toast、順便刷新資料夾防護清單頁狀態——同樣要切回 UI 執行緒，理由跟上面
+        // _vaultChangeWatcher.Changed 一樣。
+        _folderGuardService.EntriesAutoRelocked += (_, paths) =>
+            Dispatcher.BeginInvoke(() => SendToFrontend(new { type = "folderGuardAutoRelocked", paths }));
+
         // 啟動時就先套用一次已儲存的主題背景色，不要等使用者到設定頁重新選一次才生效——
         // 不然重開 App 之後，即使上次選的是深色模式，WebView2 邊緣那圈窄邊還是會先閃一下
         // 白色，等頁面裡的 JS 執行完才切過去。
@@ -194,7 +200,11 @@ public partial class MainWindow : Window
                 // （例如上次關閉時是最大化的，這次啟動就要直接顯示「還原」而不是「最大化」）。
                 SendWindowStateToFrontend();
 
-                if (_initialPaths is { Count: > 0 })
+                // paths 為空、只帶 action 的情境是系統匣選單的分頁捷徑（見 App.xaml.cs 的
+                // ShowMainWindow，MainWindow 還沒開過、要新建一個直接帶指定分頁）——只看
+                // _initialPaths 是否非空會漏掉這個情境，導致視窗開是開了、但沒切到指定分頁，
+                // 要等視窗已經開著、再點一次托盤選單（走 ApplyIncomingPaths 那條路徑）才生效。
+                if (_initialPaths is { Count: > 0 } || _initialAction is not null)
                 {
                     // action 讓前端知道要切去哪個分頁：無值或 "encrypt" 維持既有行為（加密分頁）；
                     // "folderGuardSetup" 是右鍵「上鎖」但整個功能還沒設定過共用密碼時的引導路徑
@@ -214,13 +224,14 @@ public partial class MainWindow : Window
     /// </summary>
     public void ApplyIncomingPaths(List<string> paths, string? action = null)
     {
-        Activate();
-        if (WindowState == WindowState.Minimized)
-        {
-            WindowState = WindowState.Normal;
-        }
+        // 單靠 Activate() 在「已經在系統匣裡的實體透過 Named Pipe 收到轉送參數」這條路徑上不可靠
+        // （見 WindowActivation 上的說明），改用會強制拉到最上層的版本。
+        WindowActivation.ForceToForeground(this);
 
-        if (paths.Count > 0)
+        // paths 為空、只帶 action 的情境是系統匣選單的分頁捷徑（見 App.xaml.cs 的
+        // ShowMainWindow）——只是要切分頁，沒有要帶任何路徑進去，一樣要送出訊息，
+        // 不能只看 paths 是否為空。
+        if (paths.Count > 0 || action is not null)
         {
             SendToFrontend(new { type = "initialPaths", paths, action });
         }
@@ -386,6 +397,10 @@ public partial class MainWindow : Window
 
                 case "setFolderGuardDoubleClickUnlock":
                     await HandleSetFolderGuardDoubleClickUnlockRequestAsync(root);
+                    break;
+
+                case "setFolderGuardAutoRelock":
+                    await HandleSetFolderGuardAutoRelockRequestAsync(root);
                     break;
 
                 case "openFolderInExplorer":
@@ -723,7 +738,16 @@ public partial class MainWindow : Window
     private void HandleGetSettingsRequest()
     {
         var settings = _protocolHandlers.GetSettings();
-        SendToFrontend(new { type = "settingsResult", settings.VaultPath, settings.Language, settings.Theme, settings.CriticalActionConfigured });
+        SendToFrontend(new
+        {
+            type = "settingsResult",
+            settings.VaultPath,
+            settings.Language,
+            settings.Theme,
+            settings.CriticalActionConfigured,
+            settings.MinimizeToTrayEnabled,
+            settings.LaunchAtStartupEnabled
+        });
     }
 
     private async Task HandleSetupCriticalActionRequestAsync()
@@ -803,11 +827,21 @@ public partial class MainWindow : Window
             return;
         }
 
-        // 套用到這個視窗本身的背景色是 WPF 平台細節，設定值有沒有存成功是業務邏輯——
-        // 兩件事分開做，UpdateSetting 只管持久化，視覺副作用留在這裡。
-        if (key == "theme")
+        // 套用到這個視窗本身的背景色、系統匣圖示的建立/移除、Run 機碼的登記/反登記，都是
+        // WPF/系統層級的即時副作用，設定值有沒有存成功是業務邏輯——UpdateSetting 只管持久化，
+        // 這些副作用留在這裡處理。系統匣／開機啟動兩個設定的即時生效邏輯在 App（不是
+        // MainWindow）身上，因為系統匣圖示本來就是 App 層級、不屬於任何一個視窗的東西。
+        switch (key)
         {
-            ApplyWindowBackgroundForTheme(value);
+            case "theme":
+                ApplyWindowBackgroundForTheme(value);
+                break;
+            case "minimizeToTrayEnabled":
+                ((App)Application.Current).ApplyMinimizeToTraySetting(value == "true");
+                break;
+            case "launchAtStartupEnabled":
+                ((App)Application.Current).ApplyLaunchAtStartupSetting(value == "true");
+                break;
         }
 
         SendToFrontend(new { type = "updateSettingResult", result.Success, result.Key, result.Value });
@@ -936,6 +970,8 @@ public partial class MainWindow : Window
             configured = _folderGuardService.IsConfigured,
             passkeyEnabled = _folderGuardService.IsPasskeyEnabled,
             doubleClickUnlockEnabled = _folderGuardService.IsDoubleClickUnlockEnabled,
+            autoRelockEnabled = _folderGuardService.IsAutoRelockEnabled,
+            autoRelockMinutes = _folderGuardService.AutoRelockMinutes,
             items = entries.Select(e => new
             {
                 e.Path,
@@ -958,6 +994,24 @@ public partial class MainWindow : Window
             type = "setFolderGuardDoubleClickUnlockResult",
             success = true,
             enabled
+        });
+    }
+
+    /// <summary>設定頁「解鎖後閒置自動重新上鎖」開關——同樣沒有身份驗證要求，理由跟
+    /// HandleSetFolderGuardDoubleClickUnlockRequestAsync 一樣。minutes 的互動式驗證（例如非數字
+    /// 輸入）留給前端擋，這裡只負責把 Core 已經會 clamp 到最小 1 的結果原樣回報。</summary>
+    private async Task HandleSetFolderGuardAutoRelockRequestAsync(JsonElement request)
+    {
+        var enabled = request.GetProperty("enabled").GetBoolean();
+        var minutes = request.GetProperty("minutes").GetInt32();
+        await _folderGuardService.SetAutoRelockAsync(enabled, minutes);
+
+        SendToFrontend(new
+        {
+            type = "setFolderGuardAutoRelockResult",
+            success = true,
+            enabled,
+            minutes = _folderGuardService.AutoRelockMinutes
         });
     }
 

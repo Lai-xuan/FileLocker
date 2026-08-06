@@ -4,6 +4,7 @@
         xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
         Title="FileLocker" Height="920" Width="1280" MinHeight="600" MinWidth="720"
         WindowStyle="SingleBorderWindow"
+        WindowStartupLocation="Manual"
         ResizeMode="CanResize"
         Background="White">
 

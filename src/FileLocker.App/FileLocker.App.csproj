@@ -29,8 +29,21 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <!-- 系統匣圖示（TrayIconManager 用的 System.Windows.Forms.NotifyIcon）需要——WPF 沒有原生的
+         托盤圖示 API，跟 WinForms 混用是幫 WPF 加系統匣圖示最標準的做法，比手刻 Shell_NotifyIcon
+         P/Invoke 少很多程式碼跟維護風險，.NET 上 WPF/WinForms 可以在同一個專案共存。 -->
+    <UseWindowsForms>true</UseWindowsForms>
     <ApplicationIcon>icon.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <!-- UseWindowsForms 會自動幫整個專案加一個隱含的 `using System.Windows.Forms;`，
+       跟 UseWPF 的 `using System.Windows;` 撞名（Application、KeyEventArgs 兩邊都有同名型別）。
+       只有 TrayIconManager.cs 真的需要 WinForms，那個檔案自己寫明確的 using 就好，
+       不需要整個專案都隱含引用它。 -->
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
 
   <!--
     只有 Release 建置才需要打包前端靜態檔案——Debug 建置照舊連到 Vite 開發伺服器
